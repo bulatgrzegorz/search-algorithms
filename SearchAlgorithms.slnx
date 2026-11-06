@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/SearchAlgorithms.Benchmarks/SearchAlgorithms.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/SearchAlgorithms/SearchAlgorithms.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SearchAlgorithms.Tests/SearchAlgorithms.Tests.csproj" />
+  </Folder>
+</Solution>
