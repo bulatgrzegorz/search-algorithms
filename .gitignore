@@ -3,3 +3,5 @@ obj/
 BenchmarkDotNet.Artifacts/
 data/*.txt
 data/*.zip
+.idea/
+*.user

@@ -29,6 +29,12 @@ public sealed class LinearScan(string[] items) : ISearchAlgorithm
         finally { _lock.ExitWriteLock(); }
     }
 
+    public ValueTask DisposeAsync()
+    {
+        _lock.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
     List<string> FindAll(Func<string, bool> match)
     {
         _lock.EnterReadLock();

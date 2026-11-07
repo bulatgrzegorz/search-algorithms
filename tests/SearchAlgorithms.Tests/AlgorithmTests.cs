@@ -9,12 +9,16 @@ public class AlgorithmTests
     public static TheoryData<string> Names => new(Algorithms.All.Keys);
 
     [Theory, MemberData(nameof(Names))]
-    public void MatchesLinq(string name) => AssertMatches(Items, Algorithms.All[name](Items));
+    public async Task MatchesLinq(string name)
+    {
+        await using var algorithm = Algorithms.All[name](Items);
+        AssertMatches(Items, algorithm);
+    }
 
     [Theory, MemberData(nameof(Names))]
-    public void MatchesLinqAfterAddsAndRemoves(string name)
+    public async Task MatchesLinqAfterAddsAndRemoves(string name)
     {
-        var algorithm = Algorithms.All[name](Items);
+        await using var algorithm = Algorithms.All[name](Items);
         var expected = Items.ToHashSet();
         var candidates = Items.Concat(Others).ToArray(); // so some adds are duplicates and some removes miss
         var rnd = new Random(3);
@@ -30,7 +34,7 @@ public class AlgorithmTests
     [Theory, MemberData(nameof(Names))]
     public async Task SurvivesSearchesDuringWrites(string name)
     {
-        var algorithm = Algorithms.All[name](Items);
+        await using var algorithm = Algorithms.All[name](Items);
         using var stop = new CancellationTokenSource();
         var writer = Task.Run(() =>
         {

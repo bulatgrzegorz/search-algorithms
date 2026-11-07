@@ -1,0 +1,150 @@
+namespace SearchAlgorithms.Tests;
+
+// Small, readable cases for LuceneIndex, one rule of ISearchAlgorithm each. AlgorithmTests covers the broad randomized check.
+public class LucineTests
+{
+    [Fact]
+    public async Task EndsWithAfterAddsAndRemoves()
+    {
+        await using var luc = new LuceneIndex(["ada", "jon", "jan"]);
+
+        luc.Add("george");
+        luc.Add("ada");
+        luc.Remove("jan");
+        luc.Add("sran");
+
+        AssertItems(luc.GetByEndsWith("an"), "sran");
+    }
+    
+    [Fact]
+    public async Task StartsWithAfterAddsAndRemoves()
+    {
+        await using var luc = new LuceneIndex(["ada", "jon", "jan"]);
+
+        luc.Add("george");
+        luc.Add("ada");
+        luc.Remove("jan");
+        luc.Add("SRAN");
+
+        AssertItems(luc.GetByStartsWith("SR"), "SRAN");
+    }
+
+    [Fact]
+    public async Task IsCaseSensitive()
+    {
+        await using var luc = new LuceneIndex(["AB01", "ab02"]);
+
+        AssertItems(luc.GetByStartsWith("AB"), "AB01");
+        AssertItems(luc.GetByStartsWith("ab"), "ab02");
+        AssertItems(luc.GetByEndsWith("B01"), "AB01");
+        AssertItems(luc.Filter("b0"), "ab02");
+    }
+
+    [Fact]
+    public async Task FindsStopWordsAndSingleLetters()
+    {
+        await using var luc = new LuceneIndex(["A", "AT", "the", "IT"]);
+
+        AssertItems(luc.GetByStartsWith("A"), "A", "AT");
+        AssertItems(luc.GetByEndsWith("he"), "the");
+        AssertItems(luc.Filter("T"), "AT", "IT");
+    }
+
+    [Fact]
+    public async Task TreatsWholeValueAsOneTerm()
+    {
+        await using var luc = new LuceneIndex(["AB-01 X", "AB"]);
+
+        AssertItems(luc.GetByStartsWith("AB-"), "AB-01 X");
+        AssertItems(luc.GetByEndsWith("1 X"), "AB-01 X");
+        AssertItems(luc.Filter("-01 "), "AB-01 X");
+    }
+
+    [Fact]
+    public async Task TreatsWildcardCharactersInQueryLiterally()
+    {
+        await using var luc = new LuceneIndex(["A?B", "AxB", "A*B"]);
+
+        AssertItems(luc.GetByStartsWith("A?"), "A?B");
+        AssertItems(luc.GetByEndsWith("*B"), "A*B");
+        AssertItems(luc.Filter("?"), "A?B");
+    }
+
+    [Fact]
+    public async Task AddedItemIsFoundRightAway()
+    {
+        await using var luc = new LuceneIndex(["AB01"]);
+
+        luc.Add("CD01");
+
+        AssertItems(luc.GetByStartsWith("CD"), "CD01");
+    }
+
+    [Fact]
+    public async Task AddingExistingItemDoesNothing()
+    {
+        await using var luc = new LuceneIndex(["AB01"]);
+
+        luc.Add("AB01");
+
+        AssertItems(luc.GetByStartsWith("AB"), "AB01");
+    }
+
+    [Fact]
+    public async Task RemovedItemIsGone()
+    {
+        await using var luc = new LuceneIndex(["AB01", "AB02"]);
+
+        luc.Remove("AB01");
+        luc.Remove("ZZ99"); // missing: does nothing
+
+        AssertItems(luc.GetByStartsWith("AB"), "AB02");
+    }
+
+    [Fact]
+    public async Task RemovedAndReaddedItemIsBack()
+    {
+        await using var luc = new LuceneIndex(["AB01"]);
+
+        luc.Remove("AB01");
+        luc.Add("AB01");
+
+        AssertItems(luc.Filter("B0"), "AB01");
+    }
+
+    [Fact]
+    public async Task EmptyIndexFindsNothing()
+    {
+        await using var luc = new LuceneIndex([]);
+
+        Assert.Empty(luc.GetByStartsWith("A"));
+        Assert.Empty(luc.GetByEndsWith("A"));
+        Assert.Empty(luc.Filter("A"));
+    }
+
+    // xUnit runs test classes in parallel, and benchmarks build several indexes in one process.
+    [Fact]
+    public async Task InstancesAliveAtTheSameTimeDoNotShareData()
+    {
+        await using var first = new LuceneIndex(["AB01"]);
+        await using var second = new LuceneIndex(["CD01"]);
+
+        AssertItems(first.Filter("01"), "AB01");
+        AssertItems(second.Filter("01"), "CD01");
+    }
+
+    [Fact]
+    public async Task NewInstanceDoesNotSeeDisposedInstanceData()
+    {
+        await using (var first = new LuceneIndex(["AB01"]))
+            first.Add("AB02");
+
+        await using var second = new LuceneIndex(["CD01"]);
+
+        Assert.Empty(second.GetByStartsWith("AB"));
+        AssertItems(second.GetByStartsWith("CD"), "CD01");
+    }
+
+    static void AssertItems(IReadOnlyList<string> actual, params string[] expected) =>
+        Assert.Equal(expected.Order(), actual.Order());
+}

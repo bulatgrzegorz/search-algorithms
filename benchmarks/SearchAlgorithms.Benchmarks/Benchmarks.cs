@@ -32,10 +32,11 @@ public class SearchBenchmarks
     }
 
     [GlobalCleanup]
-    public void Cleanup()
+    public async Task Cleanup()
     {
         _stop.Cancel();
-        _writer.Wait();
+        await _writer;
+        await _algorithm.DisposeAsync();
     }
 
     [Benchmark] public long StartsWith() => Run(_prefixes, static (a, q) => a.GetByStartsWith(q));
@@ -97,6 +98,8 @@ public class MutationBenchmarks
         (_removable, _fresh) = (all[..Ops], all[(int)Size..]);
     }
 
+    [GlobalCleanup] public Task Cleanup() => _algorithm.DisposeAsync().AsTask();
+
     [Benchmark] public void Add() => _algorithm.Add(_fresh[_i++ % Ops]);
     [Benchmark] public void Remove() => _algorithm.Remove(_removable[_i++ % Ops]);
 
@@ -109,6 +112,8 @@ public class MutationBenchmarks
 }
 
 // Index build cost; Allocated approximates the index's memory footprint.
+// One build per iteration, so each instance is disposed outside the measurement.
+[InvocationCount(1)]
 public class BuildBenchmarks
 {
     [ParamsAllValues] public Scale Size;
@@ -116,8 +121,18 @@ public class BuildBenchmarks
     public static IEnumerable<string> AlgorithmNames => Algorithms.All.Keys;
 
     string[] _items = [];
+    ISearchAlgorithm? _built;
 
     [GlobalSetup] public void Setup() => _items = Dataset.Load((int)Size);
 
-    [Benchmark] public ISearchAlgorithm Build() => Algorithms.All[Algorithm](_items);
+    [Benchmark] public ISearchAlgorithm Build() => _built = Algorithms.All[Algorithm](_items);
+
+    // Blocking wait: BenchmarkDotNet only allows async on Global setup/cleanup, IterationCleanup must return void.
+    // Nulled after disposing because cleanup may also run after iterations that didn't build.
+    [IterationCleanup]
+    public void DisposeBuilt()
+    {
+        _built?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _built = null;
+    }
 }
