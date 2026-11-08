@@ -3,7 +3,7 @@ using BenchmarkDotNet.Attributes;
 
 namespace SearchAlgorithms.Benchmarks;
 
-static class Selected
+internal static class Selected
 {
     // ALGORITHM env var limits a run to one algorithm (CI runs one job per algorithm); unset runs all.
     public static IEnumerable<string> AlgorithmNames =>
@@ -14,7 +14,7 @@ static class Selected
 // WritesPerSecond > 0 runs a background writer during the whole benchmark to simulate live data.
 public class SearchBenchmarks
 {
-    const int ChurnPool = 1000;
+    private const int ChurnPool = 1000;
 
     [ParamsAllValues] public Scale Size;
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
@@ -22,11 +22,11 @@ public class SearchBenchmarks
     [Params(0, 100, 1000)] public int WritesPerSecond;
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
-    ISearchAlgorithm _algorithm = null!;
-    string[] _prefixes = [], _suffixes = [], _fragments = [];
-    int _next;
-    readonly CancellationTokenSource _stop = new();
-    Task _writer = Task.CompletedTask;
+    private ISearchAlgorithm _algorithm = null!;
+    private string[] _prefixes = [], _suffixes = [], _fragments = [];
+    private int _next;
+    private readonly CancellationTokenSource _stop = new();
+    private Task _writer = Task.CompletedTask;
 
     [GlobalSetup]
     public void Setup()
@@ -41,7 +41,7 @@ public class SearchBenchmarks
     [GlobalCleanup]
     public async Task Cleanup()
     {
-        _stop.Cancel();
+        await _stop.CancelAsync();
         await _writer;
         await _algorithm.DisposeAsync();
     }
@@ -51,7 +51,7 @@ public class SearchBenchmarks
     [Benchmark] public long Filter() => Run(_fragments, static (a, q) => a.Filter(q));
 
     // Returns total hits so the JIT can't drop the work.
-    long Run(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search)
+    private long Run(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search)
     {
         var start = _next;
         _next = (start + Requests) % queries.Length;
@@ -62,7 +62,7 @@ public class SearchBenchmarks
     }
 
     // One write = an update: swap a present item for an absent one (Remove + Add), so the size stays constant.
-    void Write(string[] present, string[] absent)
+    private void Write(string[] present, string[] absent)
     {
         var clock = Stopwatch.StartNew();
         long done = 0;
@@ -87,15 +87,15 @@ public class SearchBenchmarks
 [InvocationCount(Ops)]
 public class MutationBenchmarks
 {
-    const int Ops = 1000;
+    private const int Ops = 1000;
 
     [ParamsAllValues] public Scale Size;
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
-    ISearchAlgorithm _algorithm = null!;
-    string[] _removable = [], _fresh = [];
-    int _i;
+    private ISearchAlgorithm _algorithm = null!;
+    private string[] _removable = [], _fresh = [];
+    private int _i;
 
     [GlobalSetup]
     public void Setup()
@@ -127,8 +127,8 @@ public class BuildBenchmarks
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
-    string[] _items = [];
-    ISearchAlgorithm? _built;
+    private string[] _items = [];
+    private ISearchAlgorithm? _built;
 
     [GlobalSetup] public void Setup() => _items = Dataset.Load((int)Size);
 
