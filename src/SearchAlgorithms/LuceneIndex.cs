@@ -22,7 +22,7 @@ public class LuceneIndex : ISearchAlgorithm
     // Like StringField (not stored, doc ids only, no norms) but tokenized, so the analyzer's n-gram tokenizers can feed it.
     private static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
-    private readonly FSDirectory _directory;
+    private readonly NRTCachingDirectory _directory;
     private readonly IndexWriter _indexWriter;
     // Lucene reuses each field's tokenizer per thread, instead of a new one (~6 KB of buffers) per field per document.
     private readonly Analyzer _analyzer = Analyzer.NewAnonymous((field, reader) => new TokenStreamComponents(field == "value-ngram"
@@ -40,10 +40,14 @@ public class LuceneIndex : ISearchAlgorithm
     public LuceneIndex(string[] items)
     {
         _path = Guid.NewGuid().ToString();
-        _directory = FSDirectory.Open(_path);
+        // MMap: Lucene.Net picks it only on Windows/Linux; elsewhere NIOFSDirectory's buffered file reads were 44-70% of a search.
+        // NRTCaching: the tiny segments each refresh after Add/Remove flushes stay in RAM (up to 5 MB each, 60 MB total);
+        // as files, opening/deleting/stat-ing them was most of a refresh.
+        _directory = new NRTCachingDirectory(new MMapDirectory(new DirectoryInfo(_path)), maxMergeSizeMB: 5, maxCachedMB: 60);
 
         // 256 MB: fastest build measured at 1M items (16 MB flushes so often that merging dominates, 2048 MB was slower too).
-        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256 };
+        // No compound file: packing each refresh's tiny segment into one meant writing, copying and deleting extra files.
+        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256, UseCompoundFile = false };
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
         // Not one AddDocuments call: that's an atomic block, which can't flush, so the whole index sat in one in-memory segment.
