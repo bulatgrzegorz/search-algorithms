@@ -48,12 +48,16 @@ public class LuceneIndex : ISearchAlgorithm
         // 256 MB: fastest build measured at 1M items (16 MB flushes so often that merging dominates, 2048 MB was slower too).
         // No compound file: packing each refresh's tiny segment into one meant writing, copying and deleting extra files.
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256, UseCompoundFile = false };
+        // Each indexing thread also flushes its own buffer at its share of the items, so flushes run in parallel. A build that
+        // fits in RAMBufferSizeMB (100k items) otherwise flushed every thread's buffer one by one inside ForceMerge.
+        indexConfig.MaxBufferedDocs = Math.Max(2, items.Length / Environment.ProcessorCount);
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
         // Not one AddDocuments call: that's an atomic block, which can't flush, so the whole index sat in one in-memory segment.
         // Each core fills its own segments; then one merge, since every extra segment costs every query a term lookup.
         Parallel.ForEach(items.Distinct(), item => _indexWriter.AddDocument(CreateDocument(item)));
         _indexWriter.ForceMerge(1);
+        _indexWriter.Config.MaxBufferedDocs = IndexWriterConfig.DISABLE_AUTO_FLUSH; // build only: Add/Remove flush on refresh
 
         _searcherManager = new SearcherManager(_indexWriter, applyAllDeletes: true, searcherFactory: null);
     }
