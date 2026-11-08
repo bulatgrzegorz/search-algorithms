@@ -68,9 +68,9 @@ public class LuceneIndex : ISearchAlgorithm
     // shortcut: edges over MaxEdgeGram chars look up only their first MaxEdgeGram and verify the rest; raise MaxEdgeGram if long ones are common.
     private List<string> SearchEdge(string field, string edge, Func<string, bool> matches)
     {
-        if (edge.Length == 0) return Search(new MatchAllDocsQuery());
+        if (edge.Length == 0) return Search(term: null);
         var gram = edge.Length <= MaxEdgeGram ? edge : edge[..MaxEdgeGram];
-        var ids = Search(new TermQuery(new Term(field, gram)));
+        var ids = Search(new Term(field, gram));
         return gram.Length == edge.Length ? ids : ids.Where(matches).ToList();
     }
 
@@ -79,17 +79,23 @@ public class LuceneIndex : ISearchAlgorithm
         // Fragments up to MaxGram chars are indexed as-is, so one exact term lookup finds them.
         // shortcut: longer fragments look up only their first MaxGram chars and verify the rest; intersect more grams if long filters matter.
         var gram = fragment.Length <= MaxGram ? fragment : fragment[..MaxGram];
-        var ids = Search(new TermQuery(new Term("value-ngram", gram)));
+        var ids = Search(new Term("value-ngram", gram));
         return gram.Length == fragment.Length ? ids : ids.Where(x => x.Contains(fragment, StringComparison.Ordinal)).ToList();
     }
 
-    private List<string> Search(Query query)
+    // Docs holding the term, or every doc for null.
+    private List<string> Search(Term? term)
     {
         RefreshIfStale();
         var indexSearcher = _searcherManager.Acquire();
         try
         {
-            var collector = new IdCollector(IdsByDoc);
+            var reader = indexSearcher.IndexReader;
+            // The term's lookup done here, not inside TermQuery, so its doc count can size the list up front
+            // (growing it was ~60% of a large search); TermQuery reuses it instead of looking the term up again.
+            var context = term is null ? null : TermContext.Build(reader.Context, term);
+            Query query = term is null ? new MatchAllDocsQuery() : new TermQuery(term, context);
+            var collector = new IdCollector(IdsByDoc, context?.DocFreq ?? reader.NumDocs);
             indexSearcher.Search(query, collector);
             return collector.Ids;
         }
@@ -182,9 +188,9 @@ public class LuceneIndex : ISearchAlgorithm
 }
 
 // Collects every hit's id: no scoring, no top-N queue, no stored-field loading, nothing decoded or allocated per hit.
-sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc) : ICollector
+internal sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc, int capacity) : ICollector
 {
-    public readonly List<string> Ids = [];
+    public readonly List<string> Ids = new(capacity);
     private string[] _ids = [];
 
     public void SetScorer(Scorer scorer) { }
@@ -194,7 +200,7 @@ sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc) : ICollector
     public bool AcceptsDocsOutOfOrder => true;
 }
 
-static class DocumentExtensions
+internal static class DocumentExtensions
 {
     public static Term IdTerm(this string id)
     {
