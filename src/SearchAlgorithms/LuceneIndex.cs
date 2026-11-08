@@ -16,8 +16,9 @@ public class LuceneIndex : ISearchAlgorithm
     private const LuceneVersion AppLuceneVersion = LuceneVersion.LUCENE_48;
     // N-gram lengths for Filter: 1..6 covers 1-2 char filters too (benchmarks use 3-6). Raising MinGram shrinks the index, but shorter filters then need a fallback.
     private const int MinGram = 1, MaxGram = 6;
-    // Longest prefix/suffix indexed for StartsWith/EndsWith (a reused tokenizer can't size itself per item).
-    private const int MaxEdgeGram = 64;
+    // Longest prefix/suffix indexed for StartsWith/EndsWith. Longer ones are nearly unique per item: indexing them up to 64 chars
+    // doubled the index's distinct terms (~6M more at 1M ISINs) and took 1.6x the build time, for queries SearchEdge can verify instead.
+    private const int MaxEdgeGram = 6;
     // Like StringField (not stored, doc ids only, no norms) but tokenized, so the analyzer's n-gram tokenizers can feed it.
     private static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
@@ -41,10 +42,14 @@ public class LuceneIndex : ISearchAlgorithm
         _path = Guid.NewGuid().ToString();
         _directory = FSDirectory.Open(_path);
 
-        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer);
+        // 256 MB: fastest build measured at 1M items (16 MB flushes so often that merging dominates, 2048 MB was slower too).
+        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256 };
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
-        _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
+        // Not one AddDocuments call: that's an atomic block, which can't flush, so the whole index sat in one in-memory segment.
+        // Each core fills its own segments; then one merge, since every extra segment costs every query a term lookup.
+        Parallel.ForEach(items.Distinct(), item => _indexWriter.AddDocument(CreateDocument(item)));
+        _indexWriter.ForceMerge(1);
 
         _searcherManager = new SearcherManager(_indexWriter, applyAllDeletes: true, searcherFactory: null);
     }
