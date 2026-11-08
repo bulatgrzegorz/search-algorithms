@@ -46,3 +46,44 @@ Tests run first, then one parallel job per registered algorithm, each with GitHu
 `short` is the default; `default` is precise but can take hours on the full filter.
 Tables land in each job's summary, everything else in the `benchmark-results-<Algorithm>` artifacts.
 Hosted runners are shared VMs (4 vCPU), so compare algorithms within one run, not across runs.
+
+## Results snapshot (2026-11-08)
+
+Apple M2 (8 cores), macOS 26.5, .NET 10.0.3, BenchmarkDotNet 0.15.8, `JOB=short` (3 warmup + 3 iterations, so expect ±10–50% noise; NaiveLuceneIndex is noisier still).
+The four quick scripts with all algorithms, at commit `4622cbc` plus `NaiveLuceneIndex`. Mean times; lower is better except Req/s.
+
+**Single-query latency, no writes** (`execute_main_comparison.sh`), μs:
+
+| Algorithm            | Small StartsWith | Small EndsWith | Small Filter | Medium StartsWith | Medium EndsWith | Medium Filter |
+|----------------------|-----------------:|---------------:|-------------:|------------------:|----------------:|--------------:|
+| LinearScan           |             55.1 |           32.1 |         75.0 |               585 |             303 |           869 |
+| ConcurrentLinearScan |              135 |            145 |          201 |             1,473 |           1,731 |         2,049 |
+| LuceneIndex          |             10.6 |            1.7 |          4.5 |               133 |             3.6 |          41.7 |
+| NaiveLuceneIndex     |            3,615 |            493 |        1,489 |             5,844 |           4,478 |        15,721 |
+
+**Single-query latency, no writes vs 1000 writes/s** (`execute_live_data.sh`, Medium), μs. Every writer reached 1000 writes/s:
+
+| Algorithm            | StartsWith 0 → 1000 | EndsWith 0 → 1000 | Filter 0 → 1000 |
+|----------------------|--------------------:|------------------:|----------------:|
+| LinearScan           |           620 → 638 |         350 → 526 |       941 → 890 |
+| ConcurrentLinearScan |       1,609 → 1,723 |     2,018 → 1,895 |   2,288 → 2,262 |
+| LuceneIndex          |           124 → 523 |          2.9 → 90 |      39 → 262   |
+| NaiveLuceneIndex     |      5,717 → 10,218 |     5,226 → 9,486 | 18,199 → 51,005 |
+
+**Throughput, 100 concurrent queries, no writes** (`execute_load.sh`, Medium), Req/s:
+
+| Algorithm            | StartsWith | EndsWith | Filter |
+|----------------------|-----------:|---------:|-------:|
+| LinearScan           |      4,777 |    3,994 |  3,329 |
+| ConcurrentLinearScan |      2,059 |    1,843 |  1,542 |
+| LuceneIndex          |     10,182 |  325,043 | 31,177 |
+| NaiveLuceneIndex     |         32 |      236 |     80 |
+
+**Build and single write** (`execute_build_and_mutation.sh`, Medium). For the Lucene indexes, Add/Remove only buffer the change; the next search pays for making it visible:
+
+| Algorithm            | Build    | Build allocated | Add      | Remove |
+|----------------------|---------:|----------------:|---------:|-------:|
+| LinearScan           |   2.5 ms |         2.07 MB |    61 ns |  43 ns |
+| ConcurrentLinearScan |  13.4 ms |        11.54 MB |    75 ns |  51 ns |
+| LuceneIndex          | 2,552 ms |        4,528 MB | 7,021 ns | 480 ns |
+| NaiveLuceneIndex     |   130 ms |          259 MB | 8,188 ns | 789 ns |
