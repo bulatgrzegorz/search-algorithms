@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using Lucene.Net.Analysis.NGram;
 using Lucene.Net.Analysis.Standard;
@@ -8,6 +9,7 @@ using Lucene.Net.Store;
 using Lucene.Net.Util;
 using Directory = System.IO.Directory;
 using Lock = System.Threading.Lock;
+using ItemsByChars = System.Collections.Concurrent.ConcurrentDictionary<string, byte>.AlternateLookup<System.ReadOnlySpan<char>>;
 
 namespace SearchAlgorithms;
 
@@ -27,7 +29,9 @@ public class LuceneIndex : ISearchAlgorithm
     private readonly Lock _refreshLock = new();
     private long _writes;  // bumped after every Add/Remove
     private long _visible; // writes the current searcher is guaranteed to include
-
+    private readonly ConcurrentDictionary<string, byte> _items = new(StringComparer.Ordinal);
+    private readonly ItemsByChars _itemsByChars;
+    
     public LuceneIndex(string[] items)
     {
         _path = Guid.NewGuid().ToString();
@@ -36,7 +40,11 @@ public class LuceneIndex : ISearchAlgorithm
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _standardAnalyzer);
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
-        _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
+        // _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
+        foreach (var item in items) _items.TryAdd(item, byte.MaxValue);
+        _itemsByChars = _items.GetAlternateLookup<ReadOnlySpan<char>>();
+        
+        _indexWriter.AddDocuments(_items.Keys.Select(CreateDocument));
         
         _searcherManager = new SearcherManager(_indexWriter, applyAllDeletes: true, searcherFactory: null);
     }
@@ -62,7 +70,7 @@ public class LuceneIndex : ISearchAlgorithm
         var indexSearcher = _searcherManager.Acquire();
         try
         {
-            var collector = new IdCollector();
+            var collector = new IdCollector(_itemsByChars);
             indexSearcher.Search(query, collector);
             return collector.Ids;
         }
@@ -88,6 +96,7 @@ public class LuceneIndex : ISearchAlgorithm
 
     public void Add(string item)
     {
+        _items.TryAdd(item, byte.MinValue);
         _indexWriter.UpdateDocument(item.IdTerm(), CreateDocument(item));
 
         Interlocked.Increment(ref _writes);
@@ -96,6 +105,7 @@ public class LuceneIndex : ISearchAlgorithm
     public void Remove(string item)
     {
         _indexWriter.DeleteDocuments(item.IdTerm());
+        _items.TryRemove(item, out _);
 
         Interlocked.Increment(ref _writes);
     }
@@ -135,16 +145,28 @@ public class LuceneIndex : ISearchAlgorithm
 }
 
 // Collects every hit's id: no scoring, no top-N queue, no stored-field loading.
-sealed class IdCollector : ICollector
+sealed class IdCollector(ItemsByChars items) : ICollector
 {
     public readonly List<string> Ids = [];
     readonly BytesRef _scratch = new();
     BinaryDocValues _ids = null!;
+    char[] _chars = [];
 
     public void SetScorer(Scorer scorer) { }
     // Called once per segment; doc numbers in Collect are relative to that segment.
     public void SetNextReader(AtomicReaderContext context) => _ids = context.AtomicReader.GetBinaryDocValues("id");
-    public void Collect(int doc) { _ids.Get(doc, _scratch); Ids.Add(Encoding.UTF8.GetString(_scratch.Bytes, _scratch.Offset, _scratch.Length)); }
+
+    public void Collect(int doc) //{ _ids.Get(doc, _scratch); Ids.Add(Encoding.UTF8.GetString(_scratch.Bytes, _scratch.Offset, _scratch.Length)); }
+    {
+        _ids.Get(doc, _scratch);
+        var bytes = _scratch.Bytes.AsSpan(_scratch.Offset, _scratch.Length);
+        var max = Encoding.UTF8.GetMaxCharCount(bytes.Length);
+        if (_chars.Length < max) _chars = new char[max];
+        
+        ReadOnlySpan<char> chars = _chars.AsSpan(0, Encoding.UTF8.GetChars(bytes, _chars));
+        Ids.Add(items.TryGetValue(chars, out var item, out _) ? item : new string(chars));
+    }
+    
     public bool AcceptsDocsOutOfOrder => true;
 }
 
