@@ -51,6 +51,29 @@ public class LucineTests
     }
 
     [Fact]
+    public async Task EmptyPrefixOrSuffixFindsEverythingAndWholeValueMatchesItself()
+    {
+        await using var luc = new LuceneIndex(["AB01", "CD02", ""]);
+        luc.Remove("CD02");
+
+        AssertItems(luc.GetByStartsWith(""), "AB01", "");
+        AssertItems(luc.GetByEndsWith(""), "AB01", "");
+        AssertItems(luc.GetByStartsWith("AB01"), "AB01");
+        AssertItems(luc.GetByEndsWith("AB01"), "AB01");
+        Assert.Empty(luc.GetByStartsWith("AB012"));
+    }
+
+    [Fact]
+    public async Task VerifiesPrefixesAndSuffixesLongerThanIndexedEdges()
+    {
+        var common = new string('A', 100); // longer than the indexed edge length
+        await using var luc = new LuceneIndex([common + "1", common + "2", "1" + common, "2" + common]);
+
+        AssertItems(luc.GetByStartsWith(common + "1"), common + "1");
+        AssertItems(luc.GetByEndsWith("1" + common), "1" + common);
+    }
+
+    [Fact]
     public async Task TreatsWholeValueAsOneTerm()
     {
         await using var luc = new LuceneIndex(["AB-01 X", "AB"]);

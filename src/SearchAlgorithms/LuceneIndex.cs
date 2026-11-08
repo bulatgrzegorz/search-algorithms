@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
+using Lucene.Net.Analysis;
 using Lucene.Net.Analysis.NGram;
-using Lucene.Net.Analysis.Standard;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
@@ -18,12 +18,17 @@ public class LuceneIndex : ISearchAlgorithm
     const LuceneVersion AppLuceneVersion = LuceneVersion.LUCENE_48;
     // N-gram lengths for Filter: 1..6 covers 1-2 char filters too (benchmarks use 3-6). Raising MinGram shrinks the index, but shorter filters then need a fallback.
     const int MinGram = 1, MaxGram = 6;
-    // Like StringField (not stored, doc ids only, no norms) but tokenized, so the n-gram tokenizer can feed it.
+    // Longest prefix/suffix indexed for StartsWith/EndsWith (a reused tokenizer can't size itself per item).
+    const int MaxEdgeGram = 64;
+    // Like StringField (not stored, doc ids only, no norms) but tokenized, so the analyzer's n-gram tokenizers can feed it.
     static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
     private readonly FSDirectory _directory;
     private readonly IndexWriter _indexWriter;
-    private readonly StandardAnalyzer _standardAnalyzer = new(AppLuceneVersion);
+    // Lucene reuses each field's tokenizer per thread, instead of a new one (~6 KB of buffers) per field per document.
+    private readonly Analyzer _analyzer = Analyzer.NewAnonymous((field, reader) => new TokenStreamComponents(field == "value-ngram"
+        ? new NGramTokenizer(AppLuceneVersion, reader, MinGram, MaxGram)
+        : new EdgeNGramTokenizer(AppLuceneVersion, reader, 1, MaxEdgeGram)), Analyzer.PER_FIELD_REUSE_STRATEGY);
     // Lucene's: ref-counts readers, so an old one closes only after the last search on it releases it.
     private readonly SearcherManager _searcherManager;
     private readonly Lock _refreshLock = new();
@@ -37,7 +42,7 @@ public class LuceneIndex : ISearchAlgorithm
         _path = Guid.NewGuid().ToString();
         _directory = FSDirectory.Open(_path);
 
-        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _standardAnalyzer);
+        var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer);
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
         // _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
@@ -50,10 +55,20 @@ public class LuceneIndex : ISearchAlgorithm
     }
 
     public IReadOnlyList<string> GetByStartsWith(string prefix) =>
-        Search(new PrefixQuery(new Term("value-exact", prefix)));
+        SearchEdge("value-prefix", prefix, x => x.StartsWith(prefix, StringComparison.Ordinal));
 
     public IReadOnlyList<string> GetByEndsWith(string suffix) =>
-        Search(new PrefixQuery(new Term("value-exact-revers", Reverse(suffix))));
+        SearchEdge("value-suffix", Reverse(suffix), x => x.EndsWith(suffix, StringComparison.Ordinal));
+
+    // "" is a prefix of everything but no indexed term, so it matches all docs like the old PrefixQuery did.
+    // shortcut: edges over MaxEdgeGram chars look up only their first MaxEdgeGram and verify the rest; raise MaxEdgeGram if long ones are common.
+    List<string> SearchEdge(string field, string edge, Func<string, bool> matches)
+    {
+        if (edge.Length == 0) return Search(new MatchAllDocsQuery());
+        var gram = edge.Length <= MaxEdgeGram ? edge : edge[..MaxEdgeGram];
+        var ids = Search(new TermQuery(new Term(field, gram)));
+        return gram.Length == edge.Length ? ids : ids.Where(matches).ToList();
+    }
 
     public IReadOnlyList<string> Filter(string fragment)
     {
@@ -114,7 +129,7 @@ public class LuceneIndex : ISearchAlgorithm
     {
         _searcherManager.Dispose();
         _indexWriter.Dispose();
-        _standardAnalyzer.Dispose();
+        _analyzer.Dispose();
         _directory.Dispose();
 
         Directory.Delete(_path, true);
@@ -128,9 +143,11 @@ public class LuceneIndex : ISearchAlgorithm
         [
             new StringField("id", x, Field.Store.NO),        // indexed: Add/Remove find the doc by this term
             new BinaryDocValuesField("id", new BytesRef(x)), // column: IdCollector reads the value back per hit
-            new StringField("value-exact", x, Field.Store.NO),
-            new StringField("value-exact-revers", Reverse(x), Field.Store.NO),
-            new Field("value-ngram", new NGramTokenizer(AppLuceneVersion, new StringReader(x), MinGram, MaxGram), NGramFieldType)
+            // Every prefix (of the reverse: every suffix) is its own term, so StartsWith/EndsWith are one term lookup
+            // instead of a PrefixQuery visiting each matching item's term. Max(1, ..): the tokenizer rejects 0, "" yields no terms.
+            new Field("value-prefix", x, NGramFieldType),
+            new Field("value-suffix", Reverse(x), NGramFieldType),
+            new Field("value-ngram", x, NGramFieldType)
         ];
 
         return document;
@@ -156,7 +173,7 @@ sealed class IdCollector(ItemsByChars items) : ICollector
     // Called once per segment; doc numbers in Collect are relative to that segment.
     public void SetNextReader(AtomicReaderContext context) => _ids = context.AtomicReader.GetBinaryDocValues("id");
 
-    public void Collect(int doc) //{ _ids.Get(doc, _scratch); Ids.Add(Encoding.UTF8.GetString(_scratch.Bytes, _scratch.Offset, _scratch.Length)); }
+    public void Collect(int doc)
     {
         _ids.Get(doc, _scratch);
         var bytes = _scratch.Bytes.AsSpan(_scratch.Offset, _scratch.Length);
