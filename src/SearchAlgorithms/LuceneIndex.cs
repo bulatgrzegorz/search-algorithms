@@ -1,3 +1,4 @@
+using System.Text;
 using Lucene.Net.Analysis.NGram;
 using Lucene.Net.Analysis.Standard;
 using Lucene.Net.Documents;
@@ -143,7 +144,7 @@ sealed class IdCollector : ICollector
     public void SetScorer(Scorer scorer) { }
     // Called once per segment; doc numbers in Collect are relative to that segment.
     public void SetNextReader(AtomicReaderContext context) => _ids = context.AtomicReader.GetBinaryDocValues("id");
-    public void Collect(int doc) { _ids.Get(doc, _scratch); Ids.Add(_scratch.Utf8ToString()); }
+    public void Collect(int doc) { _ids.Get(doc, _scratch); Ids.Add(Encoding.UTF8.GetString(_scratch.Bytes, _scratch.Offset, _scratch.Length)); }
     public bool AcceptsDocsOutOfOrder => true;
 }
 
