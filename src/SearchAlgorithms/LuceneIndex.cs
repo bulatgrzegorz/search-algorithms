@@ -1,5 +1,4 @@
-using System.Collections.Concurrent;
-using System.Text;
+using System.Runtime.CompilerServices;
 using Lucene.Net.Analysis;
 using Lucene.Net.Analysis.NGram;
 using Lucene.Net.Documents;
@@ -9,19 +8,18 @@ using Lucene.Net.Store;
 using Lucene.Net.Util;
 using Directory = System.IO.Directory;
 using Lock = System.Threading.Lock;
-using ItemsByChars = System.Collections.Concurrent.ConcurrentDictionary<string, byte>.AlternateLookup<System.ReadOnlySpan<char>>;
 
 namespace SearchAlgorithms;
 
 public class LuceneIndex : ISearchAlgorithm
 {
-    const LuceneVersion AppLuceneVersion = LuceneVersion.LUCENE_48;
+    private const LuceneVersion AppLuceneVersion = LuceneVersion.LUCENE_48;
     // N-gram lengths for Filter: 1..6 covers 1-2 char filters too (benchmarks use 3-6). Raising MinGram shrinks the index, but shorter filters then need a fallback.
-    const int MinGram = 1, MaxGram = 6;
+    private const int MinGram = 1, MaxGram = 6;
     // Longest prefix/suffix indexed for StartsWith/EndsWith (a reused tokenizer can't size itself per item).
-    const int MaxEdgeGram = 64;
+    private const int MaxEdgeGram = 64;
     // Like StringField (not stored, doc ids only, no norms) but tokenized, so the analyzer's n-gram tokenizers can feed it.
-    static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
+    private static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
     private readonly FSDirectory _directory;
     private readonly IndexWriter _indexWriter;
@@ -34,9 +32,10 @@ public class LuceneIndex : ISearchAlgorithm
     private readonly Lock _refreshLock = new();
     private long _writes;  // bumped after every Add/Remove
     private long _visible; // writes the current searcher is guaranteed to include
-    private readonly ConcurrentDictionary<string, byte> _items = new(StringComparer.Ordinal);
-    private readonly ItemsByChars _itemsByChars;
-    
+    // Per segment: its ids decoded once, indexed by doc number. Segments never change (deletes only hide docs),
+    // so a table stays valid; keyed by the segment's core, it is dropped once Lucene no longer has that segment open.
+    private readonly ConditionalWeakTable<object, string[]> _idsBySegment = new();
+
     public LuceneIndex(string[] items)
     {
         _path = Guid.NewGuid().ToString();
@@ -45,12 +44,8 @@ public class LuceneIndex : ISearchAlgorithm
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer);
         _indexWriter = new IndexWriter(_directory, indexConfig);
 
-        // _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
-        foreach (var item in items) _items.TryAdd(item, byte.MaxValue);
-        _itemsByChars = _items.GetAlternateLookup<ReadOnlySpan<char>>();
-        
-        _indexWriter.AddDocuments(_items.Keys.Select(CreateDocument));
-        
+        _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
+
         _searcherManager = new SearcherManager(_indexWriter, applyAllDeletes: true, searcherFactory: null);
     }
 
@@ -62,7 +57,7 @@ public class LuceneIndex : ISearchAlgorithm
 
     // "" is a prefix of everything but no indexed term, so it matches all docs like the old PrefixQuery did.
     // shortcut: edges over MaxEdgeGram chars look up only their first MaxEdgeGram and verify the rest; raise MaxEdgeGram if long ones are common.
-    List<string> SearchEdge(string field, string edge, Func<string, bool> matches)
+    private List<string> SearchEdge(string field, string edge, Func<string, bool> matches)
     {
         if (edge.Length == 0) return Search(new MatchAllDocsQuery());
         var gram = edge.Length <= MaxEdgeGram ? edge : edge[..MaxEdgeGram];
@@ -79,13 +74,13 @@ public class LuceneIndex : ISearchAlgorithm
         return gram.Length == fragment.Length ? ids : ids.Where(x => x.Contains(fragment, StringComparison.Ordinal)).ToList();
     }
 
-    List<string> Search(Query query)
+    private List<string> Search(Query query)
     {
         RefreshIfStale();
         var indexSearcher = _searcherManager.Acquire();
         try
         {
-            var collector = new IdCollector(_itemsByChars);
+            var collector = new IdCollector(IdsByDoc);
             indexSearcher.Search(query, collector);
             return collector.Ids;
         }
@@ -95,8 +90,27 @@ public class LuceneIndex : ISearchAlgorithm
         }
     }
 
+    // Built by the first search that reaches a segment: a few ms for a large freshly merged one, then free.
+    // Read from the "id" terms' postings, so a hit costs an array index instead of a doc-values read from the file.
+    private string[] IdsByDoc(AtomicReader segment) => _idsBySegment.GetValue(segment.CoreCacheKey, _ =>
+    {
+        var ids = new string[segment.MaxDoc];
+        var terms = segment.GetTerms("id").GetEnumerator();
+
+        DocsEnum? docs = null;
+        while (terms.MoveNext())
+        {
+            var id = terms.Term.Utf8ToString();
+            // liveDocs null: deleted docs too, as later readers of this segment may hide a different set.
+            docs = terms.Docs(null, docs, DocsFlags.NONE);
+            for (var doc = docs.NextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = docs.NextDoc()) 
+                ids[doc] = id;
+        }
+        return ids;
+    });
+
     // A search must see every write that finished before it started; many writes share one reopen.
-    void RefreshIfStale()
+    private void RefreshIfStale()
     {
         var writes = Interlocked.Read(ref _writes);
         if (writes == Interlocked.Read(ref _visible)) return;
@@ -111,7 +125,6 @@ public class LuceneIndex : ISearchAlgorithm
 
     public void Add(string item)
     {
-        _items.TryAdd(item, byte.MinValue);
         _indexWriter.UpdateDocument(item.IdTerm(), CreateDocument(item));
 
         Interlocked.Increment(ref _writes);
@@ -120,7 +133,6 @@ public class LuceneIndex : ISearchAlgorithm
     public void Remove(string item)
     {
         _indexWriter.DeleteDocuments(item.IdTerm());
-        _items.TryRemove(item, out _);
 
         Interlocked.Increment(ref _writes);
     }
@@ -141,10 +153,9 @@ public class LuceneIndex : ISearchAlgorithm
     {
         Document document =
         [
-            new StringField("id", x, Field.Store.NO),        // indexed: Add/Remove find the doc by this term
-            new BinaryDocValuesField("id", new BytesRef(x)), // column: IdCollector reads the value back per hit
+            new StringField("id", x, Field.Store.NO), // indexed: Add/Remove find the doc by this term, IdsByDoc reads ids back from it
             // Every prefix (of the reverse: every suffix) is its own term, so StartsWith/EndsWith are one term lookup
-            // instead of a PrefixQuery visiting each matching item's term. Max(1, ..): the tokenizer rejects 0, "" yields no terms.
+            // instead of a PrefixQuery visiting each matching item's term.
             new Field("value-prefix", x, NGramFieldType),
             new Field("value-suffix", Reverse(x), NGramFieldType),
             new Field("value-ngram", x, NGramFieldType)
@@ -153,7 +164,7 @@ public class LuceneIndex : ISearchAlgorithm
         return document;
     }
 
-    static string Reverse(string s) =>
+    private static string Reverse(string s) =>
         string.Create(s.Length, s, static (dst, src) =>
         {
             src.AsSpan().CopyTo(dst);
@@ -161,29 +172,16 @@ public class LuceneIndex : ISearchAlgorithm
         });
 }
 
-// Collects every hit's id: no scoring, no top-N queue, no stored-field loading.
-sealed class IdCollector(ItemsByChars items) : ICollector
+// Collects every hit's id: no scoring, no top-N queue, no stored-field loading, nothing decoded or allocated per hit.
+sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc) : ICollector
 {
     public readonly List<string> Ids = [];
-    readonly BytesRef _scratch = new();
-    BinaryDocValues _ids = null!;
-    char[] _chars = [];
+    private string[] _ids = [];
 
     public void SetScorer(Scorer scorer) { }
     // Called once per segment; doc numbers in Collect are relative to that segment.
-    public void SetNextReader(AtomicReaderContext context) => _ids = context.AtomicReader.GetBinaryDocValues("id");
-
-    public void Collect(int doc)
-    {
-        _ids.Get(doc, _scratch);
-        var bytes = _scratch.Bytes.AsSpan(_scratch.Offset, _scratch.Length);
-        var max = Encoding.UTF8.GetMaxCharCount(bytes.Length);
-        if (_chars.Length < max) _chars = new char[max];
-        
-        ReadOnlySpan<char> chars = _chars.AsSpan(0, Encoding.UTF8.GetChars(bytes, _chars));
-        Ids.Add(items.TryGetValue(chars, out var item, out _) ? item : new string(chars));
-    }
-    
+    public void SetNextReader(AtomicReaderContext context) => _ids = idsByDoc(context.AtomicReader);
+    public void Collect(int doc) => Ids.Add(_ids[doc]);
     public bool AcceptsDocsOutOfOrder => true;
 }
 

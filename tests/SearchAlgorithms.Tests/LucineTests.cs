@@ -136,6 +136,25 @@ public class LucineTests
     }
 
     [Fact]
+    public async Task SearchesStayRightAsSegmentsChange()
+    {
+        await using var luc = new LuceneIndex(["AB00"]);
+        List<string> expected = ["AB00"];
+
+        // Each search reopens onto the round's new segment: earlier segments' cached id tables get reused
+        // (some now with deleted docs), and 50 one-doc segments are enough for Lucene to start merging them.
+        for (var i = 1; i <= 50; i++)
+        {
+            AssertItems(luc.GetByStartsWith("AB"), [.. expected]);
+            luc.Add($"AB{i:D2}");
+            expected.Add($"AB{i:D2}");
+            if (i % 3 == 0) { luc.Remove(expected[0]); expected.RemoveAt(0); }
+        }
+
+        AssertItems(luc.GetByStartsWith("AB"), [.. expected]);
+    }
+
+    [Fact]
     public async Task EmptyIndexFindsNothing()
     {
         await using var luc = new LuceneIndex([]);
