@@ -94,6 +94,16 @@ public class LucineTests
     }
 
     [Fact]
+    public async Task NaiveIndexTreatsWildcardCharactersInQueryLiterally()
+    {
+        await using var luc = new NaiveLuceneIndex([@"A?B", "AxB", "A*B", @"A\B"]);
+
+        AssertItems(luc.GetByStartsWith("A?"), "A?B");
+        AssertItems(luc.GetByEndsWith("*B"), "A*B");
+        AssertItems(luc.Filter(@"\"), @"A\B");
+    }
+
+    [Fact]
     public async Task AddedItemIsFoundRightAway()
     {
         await using var luc = new LuceneIndex(["AB01"]);
