@@ -19,7 +19,7 @@ public static class Algorithms
     public static readonly Dictionary<string, Func<string[], ISearchAlgorithm>> All = new()
     {
         [nameof(LinearScan)] = items => new LinearScan(items),
-        [nameof(ConcurrentLinearScan)] = items => new ConcurrentLinearScan(items),
+        // [nameof(ConcurrentLinearScan)] = items => new ConcurrentLinearScan(items),
         [nameof(LuceneIndex)] =  items => new LuceneIndex(items),
     };
 }

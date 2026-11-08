@@ -7,27 +7,46 @@ on:
         description: "BenchmarkDotNet --filter, e.g. *  |  *SearchBenchmarks*  |  *.Filter(*Size: Small*"
         default: "*"
       job:
-        description: "BenchmarkDotNet --job: dry = smoke test, short = quick, default = precise"
+        description: "BenchmarkDotNet --job: dry = smoke test, short = quick, default = precise (narrow the filter, it can take hours)"
         type: choice
-        options: [default, short, medium, dry]
-        default: default
+        options: [short, default, medium, dry]
+        default: short
 
 jobs:
-  benchmark:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    outputs:
+      algorithms: ${{ steps.list.outputs.algorithms }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - run: dotnet test -c Release
+      - id: list
+        run: echo "algorithms=$(dotnet run -c Release --no-build --project benchmarks/SearchAlgorithms.Benchmarks -- --algorithms)" >> "$GITHUB_OUTPUT"
+
+  # One job per algorithm: they run in parallel with their own 6 h limit, so a slow one can't starve the others.
+  benchmark:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        algorithm: ${{ fromJSON(needs.test.outputs.algorithms) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
       - run: data/download.sh
       - name: Run benchmarks
         working-directory: benchmarks/SearchAlgorithms.Benchmarks
         env: # passed via env, not inlined, so input text can't inject shell
           FILTER: ${{ inputs.filter }}
           JOB: ${{ inputs.job }}
+          ALGORITHM: ${{ matrix.algorithm }}
         run: dotnet run -c Release -- --filter "$FILTER" --job "$JOB"
       - name: Job summary
         if: always()
@@ -38,5 +57,5 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: benchmark-results
+          name: benchmark-results-${{ matrix.algorithm }}
           path: benchmarks/SearchAlgorithms.Benchmarks/BenchmarkDotNet.Artifacts

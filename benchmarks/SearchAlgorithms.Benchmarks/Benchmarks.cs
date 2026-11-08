@@ -3,6 +3,13 @@ using BenchmarkDotNet.Attributes;
 
 namespace SearchAlgorithms.Benchmarks;
 
+static class Selected
+{
+    // ALGORITHM env var limits a run to one algorithm (CI runs one job per algorithm); unset runs all.
+    public static IEnumerable<string> AlgorithmNames =>
+        Environment.GetEnvironmentVariable("ALGORITHM") is { Length: > 0 } one ? [one] : Algorithms.All.Keys;
+}
+
 // One invocation = `Requests` queries: 1 runs alone (latency), more run concurrently (throughput under load, see Req/s).
 // WritesPerSecond > 0 runs a background writer during the whole benchmark to simulate live data.
 public class SearchBenchmarks
@@ -13,7 +20,7 @@ public class SearchBenchmarks
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
     [Params(1, 100, 500)] public int Requests;
     [Params(0, 100, 1000)] public int WritesPerSecond;
-    public static IEnumerable<string> AlgorithmNames => Algorithms.All.Keys;
+    public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
     ISearchAlgorithm _algorithm = null!;
     string[] _prefixes = [], _suffixes = [], _fragments = [];
@@ -84,7 +91,7 @@ public class MutationBenchmarks
 
     [ParamsAllValues] public Scale Size;
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
-    public static IEnumerable<string> AlgorithmNames => Algorithms.All.Keys;
+    public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
     ISearchAlgorithm _algorithm = null!;
     string[] _removable = [], _fresh = [];
@@ -118,7 +125,7 @@ public class BuildBenchmarks
 {
     [ParamsAllValues] public Scale Size;
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
-    public static IEnumerable<string> AlgorithmNames => Algorithms.All.Keys;
+    public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
     string[] _items = [];
     ISearchAlgorithm? _built;

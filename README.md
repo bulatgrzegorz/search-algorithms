@@ -28,7 +28,11 @@ dotnet run -c Release -- --filter '*'                         # everything
 dotnet run -c Release -- --filter '*SearchBenchmarks.Filter*'  # one method
 dotnet run -c Release -- --filter '*.Filter(*Size: Small*'     # by parameter value
 dotnet run -c Release -- --filter '*' --job short              # quicker, less precise
+ALGORITHM=LinearScan dotnet run -c Release -- --filter '*'   # one algorithm
 ```
+
+Quick runs (minutes, not hours): `execute_main_comparison.sh`, `execute_live_data.sh`, `execute_load.sh`, `execute_build_and_mutation.sh` in the benchmark folder.
+Each takes `JOB=dry|short|default` (default `short`) and `ALGORITHM=<name>`, e.g. `ALGORITHM=LuceneIndex ./execute_main_comparison.sh`.
 
 - `SearchBenchmarks`: Size × Algorithm × `Requests` (1 = single-query latency; 100/500 = that many concurrent queries per op) × `WritesPerSecond` (0/100/1000 updates/s by a background writer, each one Remove + Add). `Req/s` = Requests / Mean. Whether the writer kept up is logged: `grep Writer: BenchmarkDotNet.Artifacts/*.log`.
 - `MutationBenchmarks`: single-threaded cost of one `Add` / `Remove`.
@@ -38,5 +42,7 @@ dotnet run -c Release -- --filter '*' --job short              # quicker, less p
 ## GitHub Actions
 
 Manual only: Actions → Benchmarks → Run workflow (pick filter and job), or `gh workflow run benchmarks.yml -f filter='*' -f job=short`.
-Tables land in the run summary, everything else in the `benchmark-results` artifact.
+Tests run first, then one parallel job per registered algorithm, each with GitHub's 6 h job limit; a too-slow algorithm times out alone.
+`short` is the default; `default` is precise but can take hours on the full filter.
+Tables land in each job's summary, everything else in the `benchmark-results-<Algorithm>` artifacts.
 Hosted runners are shared VMs (4 vCPU), so compare algorithms within one run, not across runs.

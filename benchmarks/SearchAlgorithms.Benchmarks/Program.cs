@@ -3,6 +3,11 @@ using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
 using BenchmarkDotNet.Reports;
 using BenchmarkDotNet.Running;
+using System.Text.Json;
+using SearchAlgorithms;
+
+// CI reads this list to start one job per algorithm.
+if (args is ["--algorithms"]) { Console.WriteLine(JsonSerializer.Serialize(Algorithms.All.Keys)); return; }
 
 BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args,
     DefaultConfig.Instance.AddDiagnoser(MemoryDiagnoser.Default).AddColumn(new RequestsPerSecondColumn()));

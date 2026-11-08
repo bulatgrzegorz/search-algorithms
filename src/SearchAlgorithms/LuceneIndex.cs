@@ -20,39 +20,20 @@ public class LuceneIndex : ISearchAlgorithm
     const int MinGram = 1, MaxGram = 6;
     // Like StringField (not stored, doc ids only, no norms) but tokenized, so the n-gram tokenizer can feed it.
     static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
-    private string path;
-    FSDirectory _directory;
-    IndexWriter _indexWriter;
-    IndexSearcher _indexSearcher;
-    StandardAnalyzer _standardAnalyzer;
+    private readonly string _path;
+    private readonly FSDirectory _directory;
+    private readonly IndexWriter _indexWriter;
+    private readonly StandardAnalyzer _standardAnalyzer = new(AppLuceneVersion);
     
     public LuceneIndex(string[] items)
     {
-        // Ensures index backward compatibility
+        _path = Guid.NewGuid().ToString();
+        _directory = FSDirectory.Open(_path);
         
-
-// Construct a machine-independent path for the index
-
-        path = Guid.NewGuid().ToString();
-        _directory = FSDirectory.Open(path);
-
-// Create an analyzer to process the text
-        _standardAnalyzer = new StandardAnalyzer(AppLuceneVersion);
-
-// Create an index writer
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _standardAnalyzer);
         _indexWriter = new IndexWriter(_directory, indexConfig);
         
-        // var fields = items.Select(x => new TextField("value", x, Field.Store.YES));
-        var f = items.Distinct().Select(CreateDocument);
-        
-        _indexWriter.AddDocuments(f);
-        // _indexWriter.Commit();
-        // _indexWriter.Flush(triggerMerge: false, applyAllDeletes: false);
-        
-        
-        // var reader = _indexWriter.GetReader(applyAllDeletes: true);
-        // _indexSearcher = new IndexSearcher(reader);
+        _indexWriter.AddDocuments(items.Distinct().Select(CreateDocument));
     }
 
     public IReadOnlyList<string> GetByStartsWithOld(string prefix)
@@ -123,14 +104,6 @@ public class LuceneIndex : ISearchAlgorithm
         using var reader = _indexWriter.GetReader(applyAllDeletes: true);
         var indexSearcher = new IndexSearcher(reader);
 
-        // var a= indexSearcher.Search(new MatchAllDocsQuery(), 10000);
-
-            // var bytes = buffer.AsSpan(0, written); // Rent can return a bigger array, so always use `written`
-            var p = QueryParserBase.Escape(prefix);
-            var pp = indexSearcher.Search(new MatchAllDocsQuery(), int.MaxValue);
-            
-            var ppp = pp.ScoreDocs.Select(x => indexSearcher.Doc(x.Doc)).ToList();
-            
         var wildcardQuery = new PrefixQuery(new Term("value-exact", QueryParserBase.Escape(prefix)));
 
         TopDocs topDocs = indexSearcher.Search(wildcardQuery,  int.MaxValue);
@@ -143,14 +116,6 @@ public class LuceneIndex : ISearchAlgorithm
         using var reader = _indexWriter.GetReader(applyAllDeletes: true);
         var indexSearcher = new IndexSearcher(reader);
 
-        // var a= indexSearcher.Search(new MatchAllDocsQuery(), 10000);
-
-        // var bytes = buffer.AsSpan(0, written); // Rent can return a bigger array, so always use `written`
-        
-        var pp = indexSearcher.Search(new MatchAllDocsQuery(), int.MaxValue);
-            
-        var ppp = pp.ScoreDocs.Select(x => indexSearcher.Doc(x.Doc)).ToList();
-        
         var wildcardQuery = new PrefixQuery(new Term("value-exact-revers", QueryParserBase.Escape(Reverse(suffix))));
 
         TopDocs topDocs = indexSearcher.Search(wildcardQuery,  int.MaxValue);
@@ -229,16 +194,12 @@ public class LuceneIndex : ISearchAlgorithm
 
     public void Add(string item)
     {
-        // _indexWriter.AddDocument(doc);
-        _indexWriter.UpdateDocument(new Term("id", item), CreateDocument(item));
-        // _indexWriter.AddDocument([new TextField("value", item, Field.Store.YES)]);
-        // _indexWriter.Commit();
+        _indexWriter.UpdateDocument(item.IdTerm(), CreateDocument(item));
     }
 
     public void Remove(string item)
     {
-        _indexWriter.DeleteDocuments(new Term("id", item));
-        // _indexWriter.Commit();
+        _indexWriter.DeleteDocuments(item.IdTerm());
     }
 
     public ValueTask DisposeAsync()
@@ -246,7 +207,7 @@ public class LuceneIndex : ISearchAlgorithm
         _standardAnalyzer.Dispose();
         _directory.Dispose();
         
-        Directory.Delete(path, true);
+        Directory.Delete(_path, true);
         
         return ValueTask.CompletedTask;
     }
@@ -259,11 +220,8 @@ public class LuceneIndex : ISearchAlgorithm
             new StringField("value-exact", QueryParserBase.Escape(x), Field.Store.YES),
             new StringField("value-exact-revers", QueryParserBase.Escape(Reverse(x)), Field.Store.YES),
             new TextField("value", QueryParserBase.Escape(x), Field.Store.YES),
-            new Field("value-ngram",
-                new NGramTokenizer(AppLuceneVersion, new StringReader(x), MinGram, MaxGram), NGramFieldType)
+            new Field("value-ngram", new NGramTokenizer(AppLuceneVersion, new StringReader(x), MinGram, MaxGram), NGramFieldType)
         ];
-        
-        // Every substring of MinGram..MaxGram chars, for Filter. IndexWriter consumes and disposes the tokenizer.
 
         return document;
     }
@@ -288,5 +246,10 @@ static class DocumentExtensions
     public static string GetId(this Document document)
     {
         return document.Get("id");
+    }
+
+    public static Term IdTerm(this string id)
+    {
+        return new Term("id", id);
     }
 }
