@@ -22,5 +22,6 @@ public static class Algorithms
         [nameof(ConcurrentLinearScan)] = items => new ConcurrentLinearScan(items),
         [nameof(LuceneIndex)] =  items => new LuceneIndex(items),
         [nameof(NaiveLuceneIndex)] = items => new NaiveLuceneIndex(items),
+        [nameof(SortedArrayIndex)] = items => new SortedArrayIndex(items),
     };
 }
