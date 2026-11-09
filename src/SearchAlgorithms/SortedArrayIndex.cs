@@ -52,6 +52,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     //   1 > 1 is false -> skip (US99, 3): "9" also starts at offset 2
     //   1 > 0 -> keep (US99, 2)
     //   -> [GB19, US99]
+    // That kept entry is at the item's first match (IndexOf), so a removed item is one binary search away and skipped there.
+    //   Removed [US99]: IndexOf("9") = 2, (US99, 2) is entry 5 -> skip 5 -> [GB19]
     public IReadOnlyList<string> Filter(string fragment)
     {
         // Every item contains "", also "" itself, which has no Substrings entry.
@@ -60,13 +62,22 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         var state = Volatile.Read(ref _state);
         var substrings = state.Base.Substrings;
         var (start, end) = FindBlock(substrings, x => CompareSubstring(x, fragment));
-        var hits = new List<string>(end - start);
+        var removedAt = state.Removed
+            .Select(x => (Item: x, Offset: x.IndexOf(fragment, StringComparison.Ordinal)))
+            .Where(x => x.Offset >= 0)
+            .Select(x => substrings.AsSpan().BinarySearch(new Substring(x.Item, x.Offset, 0), SubstringsComparer.Instance))
+            .Order().ToArray();
+        var hits = new List<string>(end - start + state.Added.Length);
+        var r = 0;
         for (var i = start; i < end; i++)
         {
             var (item, _, repeat) = substrings[i];
-            if (fragment.Length > repeat) hits.Add(item);
+            if (r < removedAt.Length && removedAt[r] == i) r++;
+            else if (fragment.Length > repeat) hits.Add(item);
         }
-        return WithDelta(hits, state, x => x.Contains(fragment, StringComparison.Ordinal));
+        // Added items are never in Base, so they can't repeat a hit.
+        hits.AddRange(state.Added.Where(x => x.Contains(fragment, StringComparison.Ordinal)));
+        return hits;
     }
 
     // Delta, starting empty (Base = GB19, US12, US99):
@@ -193,30 +204,6 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         !state.Removed.Any(matches) && !state.Added.Any(matches)
             ? block
             : MergeSorted(block, state.Removed.Where(matches), state.Added.Where(matches), comparer);
-
-    // Filter's hits with the delta applied; `matches` is Contains(fragment).
-    // No removed item matches and no added one matches: return baseHits unchanged.
-    // Otherwise copy baseHits without the matching removed items, plus the matching added ones.
-    // Added [US55], Removed [US12]:
-    //   Filter("1"): baseHits [US12, GB19] -> US12 removed -> new list [GB19]
-    //   Filter("9"): baseHits [GB19, US99], nothing in the delta contains "9" -> baseHits itself
-    private static IReadOnlyList<string> WithDelta(IReadOnlyList<string> baseHits, State state, Func<string, bool> matches)
-    {
-        var anyRemoved = state.Removed.Any(matches);
-        if (!anyRemoved && !state.Added.Any(matches)) return baseHits;
-
-        var hits = new List<string>(baseHits.Count + state.Added.Length);
-        if (anyRemoved)
-        {
-            // shortcut: one hash lookup per hit, so a big block costs a full pass while removes are pending; binary-search their places if that shows up.
-            var removed = state.Removed.Where(matches).ToHashSet(StringComparer.Ordinal);
-            hits.AddRange(baseHits.Where(x => !removed.Contains(x)));
-        }
-        else hits.AddRange(baseHits);
-
-        hits.AddRange(state.Added.Where(matches));
-        return hits;
-    }
 
     // [Start, End) of the entries where compare returns 0. compare is < 0 before that block and > 0 after it,
     // so Start = first entry with compare >= 0, End = first entry with compare > 0.
