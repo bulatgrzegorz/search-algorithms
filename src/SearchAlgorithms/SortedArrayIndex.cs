@@ -33,7 +33,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         var state = Volatile.Read(ref _state);
         var sorted = state.Base.ByPrefix;
         var (start, end) = FindBlock(sorted, x => ComparePrefix(x, prefix));
-        return WithDelta(new ArraySegment<string>(sorted, start, end - start), state, x => x.StartsWith(prefix, StringComparison.Ordinal));
+        return WithDelta(new ArraySegment<string>(sorted, start, end - start), state, x => x.StartsWith(prefix, StringComparison.Ordinal), StringComparer.Ordinal);
     }
 
     // EndsWith("9"): BySuffix [US12, GB19, US99], block (1, 3) -> GB19, US99.
@@ -42,7 +42,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         var state = Volatile.Read(ref _state);
         var sorted = state.Base.BySuffix;
         var (start, end) = FindBlock(sorted, x => CompareSuffix(x, suffix));
-        return WithDelta(new ArraySegment<string>(sorted, start, end - start), state, x => x.EndsWith(suffix, StringComparison.Ordinal));
+        return WithDelta(new ArraySegment<string>(sorted, start, end - start), state, x => x.EndsWith(suffix, StringComparison.Ordinal), BackwardsComparer.Instance);
     }
 
     // An item matching at several offsets is in the block several times: keep only its first one,
@@ -146,26 +146,26 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
 
     // sorted without `removed`, plus `added`. Every removed entry is in sorted and no added one is, so each one's place
     // is one binary search (comparer must be a total order), and the stretches between those places are copied whole.
-    private static T[] MergeSorted<T>(T[] sorted, IEnumerable<T> removed, IEnumerable<T> added, IComparer<T> comparer)
+    private static T[] MergeSorted<T>(ArraySegment<T> sorted, IEnumerable<T> removed, IEnumerable<T> added, IComparer<T> comparer)
     {
-        var removedAt = removed.Select(x => Array.BinarySearch(sorted, x, comparer)).Order().ToArray();
+        var removedAt = removed.Select(x => sorted.AsSpan().BinarySearch(x, comparer)).Order().ToArray();
         // Sorted, so items that go to the same place go there in order.
-        var addedAt = added.Order(comparer).Select(x => (At: ~Array.BinarySearch(sorted, x, comparer), Item: x)).ToArray();
+        var addedAt = added.Order(comparer).Select(x => (At: ~sorted.AsSpan().BinarySearch(x, comparer), Item: x)).ToArray();
 
-        var result = new T[sorted.Length - removedAt.Length + addedAt.Length];
+        var result = new T[sorted.Count - removedAt.Length + addedAt.Length];
         int from = 0, to = 0, r = 0, a = 0;
         while (r < removedAt.Length || a < addedAt.Length)
         {
             // An added entry at the place of a removed one sorts before it, so goes first.
             var insert = a < addedAt.Length && (r == removedAt.Length || addedAt[a].At <= removedAt[r]);
             var at = insert ? addedAt[a].At : removedAt[r];
-            Array.Copy(sorted, from, result, to, at - from);
+            sorted.AsSpan(from, at - from).CopyTo(result.AsSpan(to));
             to += at - from;
             from = at;
             if (insert) result[to++] = addedAt[a++].Item;
             else { from++; r++; }
         }
-        Array.Copy(sorted, from, result, to, sorted.Length - from);
+        sorted.AsSpan(from).CopyTo(result.AsSpan(to));
         return result;
     }
 
@@ -183,12 +183,23 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         return repeat;
     }
 
-    // baseHits with the delta applied; `matches` is the query's own check (StartsWith / EndsWith / Contains).
-    // No removed item matches and no added one matches: return baseHits unchanged (keeps a block uncopied).
+    // The block (sorted by comparer) with the delta applied; `matches` is the query's own check (StartsWith / EndsWith).
+    // No removed item matches and no added one matches: return the block itself, uncopied.
+    // Otherwise MergeSorted: the matching removed items are in the block, so each is one binary search, not a hash lookup per hit.
+    // Added [US55], Removed [US12]:
+    //   StartsWith("US"): block [US12, US99] -> skip US12, put US55 -> [US55, US99]
+    //   StartsWith("GB"): block [GB19], nothing in the delta starts with "GB" -> the block itself
+    private static IReadOnlyList<string> WithDelta(ArraySegment<string> block, State state, Func<string, bool> matches, IComparer<string> comparer) =>
+        !state.Removed.Any(matches) && !state.Added.Any(matches)
+            ? block
+            : MergeSorted(block, state.Removed.Where(matches), state.Added.Where(matches), comparer);
+
+    // Filter's hits with the delta applied; `matches` is Contains(fragment).
+    // No removed item matches and no added one matches: return baseHits unchanged.
     // Otherwise copy baseHits without the matching removed items, plus the matching added ones.
     // Added [US55], Removed [US12]:
-    //   StartsWith("US"): baseHits [US12, US99] -> US12 removed, US55 added -> new list [US99, US55]
-    //   StartsWith("GB"): baseHits [GB19], nothing in the delta starts with "GB" -> baseHits itself
+    //   Filter("1"): baseHits [US12, GB19] -> US12 removed -> new list [GB19]
+    //   Filter("9"): baseHits [GB19, US99], nothing in the delta contains "9" -> baseHits itself
     private static IReadOnlyList<string> WithDelta(IReadOnlyList<string> baseHits, State state, Func<string, bool> matches)
     {
         var anyRemoved = state.Removed.Any(matches);
