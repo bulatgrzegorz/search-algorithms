@@ -5,12 +5,16 @@ public enum Scale { Small = 10_000, Medium = 100_000, Huge = 1_000_000 }
 
 public static class Dataset
 {
-    // First `count` of a seeded shuffle, so Small ⊂ Medium ⊂ Huge and items past a size are real ISINs not yet in the set.
+    // DATASET env var picks data/<name>.txt: isin (default) or names (GLEIF legal entity names), see data/download.sh.
+    public static string Name => Environment.GetEnvironmentVariable("DATASET") is { Length: > 0 } name ? name : "isin";
+
+    // First `count` of a seeded shuffle, so Small ⊂ Medium ⊂ Huge and items past a size are real items not yet in the set.
+    // A count past the file's end loads all of it.
     public static string[] Load(int count)
     {
-        var items = File.ReadAllLines(Find("isin.txt"));
-        new Random(42).Shuffle(items); // source is grouped by issuer; shuffle so each size is a fair sample
-        return items[..count];
+        var items = File.ReadAllLines(Find($"{Name}.txt"));
+        new Random(42).Shuffle(items); // source is grouped (by issuer, alphabetically); shuffle so each size is a fair sample
+        return items[..Math.Min(count, items.Length)];
     }
 
     // Cut from random items so queries hit; fixed seed so every algorithm gets the same queries.
@@ -37,6 +41,6 @@ public static class Dataset
             var path = Path.Combine(dir.FullName, "data", name);
             if (File.Exists(path)) return path;
         }
-        throw new FileNotFoundException($"data/{name} not found, run data/download.sh first.");
+        throw new FileNotFoundException($"data/{name} not found, run data/download.sh {Path.GetFileNameWithoutExtension(name)} first.");
     }
 }

@@ -6,8 +6,12 @@ including live data (`Add` / `Remove` while searches run).
 ## Data
 
 ```sh
-data/download.sh   # GLEIF ISIN->LEI mapping, ~9.4M unique ISINs -> data/isin.txt (gitignored)
+data/download.sh         # GLEIF ISIN->LEI mapping, ~9.4M unique ISINs -> data/isin.txt (gitignored)
+data/download.sh names   # GLEIF LEI golden copy (~485 MB download, needs python3), ~3.4M unique legal names -> data/names.txt
 ```
+
+`DATASET=names` (env var, default `isin`) runs any benchmark or script below on the names: variable length (avg 28, max 476 chars), spaces, Unicode.
+BenchmarkDotNet tables don't show the dataset, so keep runs apart.
 
 Sizes (`Scale` in `Dataset.cs`): Small 10k, Medium 100k, Huge 1M. Each is a seeded random sample, and Small ⊂ Medium ⊂ Huge.
 Queries are 3–6 char cuts of random items (seeded), so every algorithm sees the same queries.
@@ -37,7 +41,13 @@ Each takes `JOB=dry|short|default` (default `short`) and `ALGORITHM=<name>`, e.g
 - `SearchBenchmarks`: Size × Algorithm × `Requests` (1 = single-query latency; 100/500 = that many concurrent queries per op) × `WritesPerSecond` (0/100/1000 updates/s by a background writer, each one Remove + Add). `Req/s` = Requests / Mean. Whether the writer kept up is logged: `grep Writer: BenchmarkDotNet.Artifacts/*.log`.
 - `MutationBenchmarks`: single-threaded cost of one `Add` / `Remove`.
 - `BuildBenchmarks`: index build time; `Allocated` ≈ index memory.
+- `TypeaheadBenchmarks` (`execute_typeahead.sh`): one search per keystroke of a typed query, reading only the first 10 hits, so indexes that copy every hit up front pay for it.
 - Results: `BenchmarkDotNet.Artifacts/results` (markdown, csv, html).
+
+Not BenchmarkDotNet, each prints a markdown table:
+
+- `execute_latency.sh [size] [queries/s] [seconds] [writes/s]`: p50–max latency at a fixed query rate (open loop, see `LatencyRun.cs`). A stall shows up in every query queued behind it, which a mean hides.
+- `execute_footprint.sh [items]`: build time, first (cold) query, retained heap, RSS and disk per index, one process each (see `FootprintRun.cs`). `HEAP_LIMIT_MB=512` runs each under a container-like heap limit; the build's peak counts, not only what the index keeps.
 
 ## GitHub Actions
 
@@ -48,6 +58,8 @@ Tables land in each job's summary, everything else in the `benchmark-results-<Al
 Hosted runners are shared VMs (4 vCPU), so compare algorithms within one run, not across runs.
 
 ## Results snapshot (2026-11-08)
+
+Newer: [2026-11-10, LuceneIndex vs SortedArrayIndex](docs/results-2026-11-10.md): typeahead, tail latency under writes, memory footprint, ISINs and names.
 
 Apple M2 (8 cores), macOS 26.5, .NET 10.0.3, BenchmarkDotNet 0.15.8, `JOB=short` (3 warmup + 3 iterations, so expect ±10–50% noise; NaiveLuceneIndex is noisier still).
 The four quick scripts with all algorithms, at commit `4622cbc` plus `NaiveLuceneIndex`. Mean times; lower is better except Req/s.

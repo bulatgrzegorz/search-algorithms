@@ -5,9 +5,13 @@ using BenchmarkDotNet.Reports;
 using BenchmarkDotNet.Running;
 using System.Text.Json;
 using SearchAlgorithms;
+using SearchAlgorithms.Benchmarks;
 
 // CI reads this list to start one job per algorithm.
 if (args is ["--algorithms"]) { Console.WriteLine(JsonSerializer.Serialize(Algorithms.All.Keys)); return; }
+// Measurements BenchmarkDotNet's closed-loop means can't make: see LatencyRun and FootprintRun.
+if (args is ["latency", .. var latencyArgs]) { LatencyRun.Run(latencyArgs); return; }
+if (args is ["footprint", .. var footprintArgs]) { FootprintRun.Run(footprintArgs); return; }
 
 BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args,
     DefaultConfig.Instance.AddDiagnoser(MemoryDiagnoser.Default).AddColumn(new RequestsPerSecondColumn()));
