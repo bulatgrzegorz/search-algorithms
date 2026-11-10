@@ -35,7 +35,9 @@ public class SearchBenchmarks
         var items = all[..(int)Size];
         _algorithm = Algorithms.All[Algorithm](items);
         (_prefixes, _suffixes, _fragments) = Dataset.Queries(items);
-        if (WritesPerSecond > 0) _writer = Task.Run(() => Write(items[..ChurnPool], all[(int)Size..]));
+        // Shows in the log whether the algorithm kept up with the target rate.
+        if (WritesPerSecond > 0) _writer = Task.Run(() => Console.WriteLine(
+            $"Writer: {Writer.Run(_algorithm, items[..ChurnPool], all[(int)Size..], WritesPerSecond, _stop.Token):N0} writes/s achieved, target {WritesPerSecond}"));
     }
 
     [GlobalCleanup]
@@ -60,25 +62,71 @@ public class SearchBenchmarks
         Parallel.For(0, Requests, i => Interlocked.Add(ref hits, search(_algorithm, queries[(start + i) % queries.Length]).Count));
         return hits;
     }
+}
 
-    // One write = an update: swap a present item for an absent one (Remove + Add), so the size stays constant.
-    private void Write(string[] present, string[] absent)
+// Background writer for live data. One write = an update: swap a present item for an absent one (Remove + Add), so the size
+// stays constant. Runs until stopped and returns the rate it achieved.
+internal static class Writer
+{
+    public static double Run(ISearchAlgorithm algorithm, string[] present, string[] absent, int writesPerSecond, CancellationToken stop)
     {
         var clock = Stopwatch.StartNew();
         long done = 0;
-        while (!_stop.IsCancellationRequested)
+        while (!stop.IsCancellationRequested)
         {
-            for (; done < clock.Elapsed.TotalSeconds * WritesPerSecond && !_stop.IsCancellationRequested; done++)
+            for (; done < clock.Elapsed.TotalSeconds * writesPerSecond && !stop.IsCancellationRequested; done++)
             {
                 var k = (int)(done % present.Length);
-                _algorithm.Remove(present[k]);
-                _algorithm.Add(absent[k]);
+                algorithm.Remove(present[k]);
+                algorithm.Add(absent[k]);
                 (present[k], absent[k]) = (absent[k], present[k]);
             }
             Thread.Sleep(1);
         }
-        // Shows in the log whether the algorithm kept up with the target rate.
-        Console.WriteLine($"Writer: {done / clock.Elapsed.TotalSeconds:N0} writes/s achieved, target {WritesPerSecond}");
+        return done / clock.Elapsed.TotalSeconds;
+    }
+}
+
+// A user typing into a search box: one search per keystroke ("U", "US", "US0", ...), each showing its first TopN hits.
+// One invocation = one typed query of 3-6 keystrokes (the Queries cuts). Short prefixes have huge result sets, of which only
+// TopN are read, so this rewards indexes that don't copy hits up front. No EndsWith: nobody types right to left.
+// Which TopN differs per algorithm: ISearchAlgorithm has no ranking or order.
+public class TypeaheadBenchmarks
+{
+    private const int TopN = 10;
+
+    [ParamsAllValues] public Scale Size;
+    [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
+    public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
+
+    private ISearchAlgorithm _algorithm = null!;
+    private string[] _prefixes = [], _fragments = [];
+    private int _next;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        var items = Dataset.Load((int)Size);
+        _algorithm = Algorithms.All[Algorithm](items);
+        (_prefixes, _, _fragments) = Dataset.Queries(items);
+    }
+
+    [GlobalCleanup] public Task Cleanup() => _algorithm.DisposeAsync().AsTask();
+
+    [Benchmark] public long StartsWith() => Type(_prefixes, static (a, q) => a.GetByStartsWith(q));
+    [Benchmark] public long Filter() => Type(_fragments, static (a, q) => a.Filter(q));
+
+    // Returns the shown hits' total length so the JIT can't drop reading them.
+    private long Type(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search)
+    {
+        var query = queries[_next++ % queries.Length];
+        long shown = 0;
+        for (var typed = 1; typed <= query.Length; typed++)
+        {
+            var hits = search(_algorithm, query[..typed]);
+            for (var i = 0; i < Math.Min(TopN, hits.Count); i++) shown += hits[i].Length;
+        }
+        return shown;
     }
 }
 
