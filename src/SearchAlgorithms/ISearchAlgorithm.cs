@@ -18,10 +18,12 @@ public static class Algorithms
     // Register new implementations here; benchmarks and tests pick them up automatically.
     public static readonly Dictionary<string, Func<string[], ISearchAlgorithm>> All = new()
     {
-        [nameof(LinearScan)] = items => new LinearScan(items),
-        [nameof(ConcurrentLinearScan)] = items => new ConcurrentLinearScan(items),
-        [nameof(LuceneIndex)] =  items => new LuceneIndex(items),
-        [nameof(NaiveLuceneIndex)] = items => new NaiveLuceneIndex(items),
+        // [nameof(LinearScan)] = items => new LinearScan(items),
+        // [nameof(ConcurrentLinearScan)] = items => new ConcurrentLinearScan(items),
+        // [nameof(LuceneIndex)] =  items => new LuceneIndex(items),
+        // [nameof(NaiveLuceneIndex)] = items => new NaiveLuceneIndex(items),
         [nameof(SortedArrayIndex)] = items => new SortedArrayIndex(items),
+        [nameof(RocksDbIndex)] = items => new RocksDbIndex(items),
+        [nameof(NaiveRocksDbIndex)] = items => new NaiveRocksDbIndex(items),
     };
 }

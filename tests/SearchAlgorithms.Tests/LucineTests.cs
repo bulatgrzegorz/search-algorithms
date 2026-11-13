@@ -4,6 +4,22 @@ namespace SearchAlgorithms.Tests;
 public class LucineTests
 {
     [Fact]
+    public async Task EndsWithAfterAddsAndRemoves1()
+    {
+        await using var luc1 = new RocksDbIndex(["US99"]);
+        luc1.Filter("S9");
+        
+        await using var luc = new RocksDbIndex(["ada", "jon", "jan", "kurawa"]);
+
+        luc.Add("george");
+        luc.Add("ada");
+        luc.Remove("jan");
+        luc.Add("sran");
+
+        AssertItems(luc.Filter("ra"), "sran");
+    }
+    
+    [Fact]
     public async Task EndsWithAfterAddsAndRemoves()
     {
         await using var luc = new LuceneIndex(["ada", "jon", "jan"]);

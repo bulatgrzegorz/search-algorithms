@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Lucene.Net.Analysis.Reverse;
 using Lucene.Net.Analysis.Standard;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;

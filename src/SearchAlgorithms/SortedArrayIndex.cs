@@ -53,29 +53,29 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     //   1 > 0 -> keep (US99, 2)
     //   -> [GB19, US99]
     // That kept entry is at the item's first match (IndexOf), so a removed item is one binary search away and skipped there.
-    //   Removed [US99]: IndexOf("9") = 2, (US99, 2) is entry 5 -> skip 5 -> [GB19]
-    // shortcut: the delta is scanned whole (IndexOf / Contains per item), up to MergeThreshold of them; index its substrings if that shows.
+    //   Removed [US99]: IndexOf("9") = 2, (US99, 2) is block entry 2 -> skip 2 -> [GB19]
+    // The delta is scanned (IndexOf / Contains per item), not indexed like Base: keeping sorted substrings for it made
+    // writes ~15x slower on Huge (each write copies them, ~200 B per pending item) and Filter no faster.
     public IReadOnlyList<string> Filter(string fragment)
     {
         // Every item contains "", also "" itself, which has no Substrings entry.
         if (fragment.Length == 0) return GetByStartsWith(fragment);
 
         var state = Volatile.Read(ref _state);
-        var substrings = state.Base.Substrings;
-        var block = FindBlock<Substring, SubstringOrder>(substrings, fragment);
+        var block = FindBlock<Substring, SubstringOrder>(state.Base.Substrings, fragment).AsSpan();
         List<int> removedAt = [];
         foreach (var x in state.Removed.ByPrefix)
         {
             var offset = x.IndexOf(fragment, StringComparison.Ordinal);
             // Its entry starts with fragment, so it is in the block.
-            if (offset >= 0) removedAt.Add(block.Offset + block.AsSpan().BinarySearch(new Substring(x, offset, 0), default(SubstringOrder)));
+            if (offset >= 0) removedAt.Add(block.BinarySearch(new Substring(x, offset, 0), default(SubstringOrder)));
         }
         removedAt.Sort();
-        var hits = new List<string>(block.Count + state.Added.Count);
+        var hits = new List<string>(block.Length + state.Added.Count);
         var r = 0;
-        for (var i = block.Offset; i < block.Offset + block.Count; i++)
+        for (var i = 0; i < block.Length; i++)
         {
-            var (item, _, repeat) = substrings[i];
+            var (item, _, repeat) = block[i];
             if (r < removedAt.Count && removedAt[r] == i) r++;
             else if (fragment.Length > repeat) hits.Add(item);
         }
@@ -137,8 +137,11 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     {
         // Bucket c is [start[c], start[c + 1]).
         var start = new int[char.MaxValue + 2];
+        
         foreach (var item in items)
-            foreach (var c in item) start[c + 1]++;
+            foreach (var c in item)
+                start[c + 1]++;
+            
         for (var c = 1; c < start.Length; c++) start[c] += start[c - 1];
 
         var substrings = new Substring[start[^1]];

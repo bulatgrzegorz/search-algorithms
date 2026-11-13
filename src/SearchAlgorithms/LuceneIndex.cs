@@ -23,6 +23,7 @@ public class LuceneIndex : ISearchAlgorithm
     private static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
     private readonly NRTCachingDirectory _directory;
+    // private readonly RAMDirectory _ramDirectory;
     private readonly IndexWriter _indexWriter;
     // Lucene reuses each field's tokenizer per thread, instead of a new one (~6 KB of buffers) per field per document.
     private readonly Analyzer _analyzer = Analyzer.NewAnonymous((field, reader) => new TokenStreamComponents(field == "value-ngram"
@@ -44,7 +45,7 @@ public class LuceneIndex : ISearchAlgorithm
         // NRTCaching: the tiny segments each refresh after Add/Remove flushes stay in RAM (up to 5 MB each, 60 MB total);
         // as files, opening/deleting/stat-ing them was most of a refresh.
         _directory = new NRTCachingDirectory(new MMapDirectory(new DirectoryInfo(_path)), maxMergeSizeMB: 5, maxCachedMB: 60);
-
+        // _ramDirectory = new RAMDirectory();
         // 256 MB: fastest build measured at 1M items (16 MB flushes so often that merging dominates, 2048 MB was slower too).
         // No compound file: packing each refresh's tiny segment into one meant writing, copying and deleting extra files.
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256, UseCompoundFile = false };
@@ -52,6 +53,7 @@ public class LuceneIndex : ISearchAlgorithm
         // fits in RAMBufferSizeMB (100k items) otherwise flushed every thread's buffer one by one inside ForceMerge.
         indexConfig.MaxBufferedDocs = Math.Max(2, items.Length / Environment.ProcessorCount);
         _indexWriter = new IndexWriter(_directory, indexConfig);
+        // _indexWriter = new IndexWriter(_ramDirectory, indexConfig);
 
         // Not one AddDocuments call: that's an atomic block, which can't flush, so the whole index sat in one in-memory segment.
         // Each core fills its own segments; then one merge, since every extra segment costs every query a term lookup.
@@ -162,6 +164,7 @@ public class LuceneIndex : ISearchAlgorithm
         _indexWriter.Dispose();
         _analyzer.Dispose();
         _directory.Dispose();
+        // _ramDirectory.Dispose();
 
         Directory.Delete(_path, true);
 
