@@ -355,7 +355,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     }
 
     // sorted without the entries at removedAt, plus each addedAt item put before sorted[At]; both in order.
-    // Only the positions until something reads it (indexer, enumeration), which copies the stretches between them once.
+    // First-page indexed reads walk the stretches directly; larger reads and enumeration copy them once.
     private sealed class Merged<T>(ArraySegment<T> sorted, int[] removedAt, (int At, T Item)[] addedAt) : IReadOnlyList<T>
     {
         // Racing readers may both copy; either result is the same.
@@ -363,13 +363,52 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
 
         public int Count => sorted.Count - removedAt.Length + addedAt.Length;
 
-        public T this[int index] => ToArray()[index];
+        public T this[int index]
+        {
+            get
+            {
+                if ((uint)index >= (uint)Count)
+                    throw new ArgumentOutOfRangeException(nameof(index));
+
+                var cached = Volatile.Read(ref _array);
+                if (cached is not null) return cached[index];
+                // Bound repeated delta walks when a caller reads more than the first page.
+                if (index >= 64) return ToArray()[index];
+
+                int from = 0, r = 0, a = 0;
+                while (r < removedAt.Length || a < addedAt.Length)
+                {
+                    var insert = a < addedAt.Length &&
+                        (r == removedAt.Length || addedAt[a].At <= removedAt[r]);
+                    var at = insert ? addedAt[a].At : removedAt[r];
+                    var length = at - from;
+                    if (index < length) return sorted[from + index];
+
+                    index -= length;
+                    from = at;
+                    if (insert)
+                    {
+                        if (index == 0) return addedAt[a].Item;
+                        index--;
+                        a++;
+                    }
+                    else { from++; r++; }
+                }
+                return sorted[from + index];
+            }
+        }
 
         public IEnumerator<T> GetEnumerator() => ((IEnumerable<T>)ToArray()).GetEnumerator();
 
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
-        public T[] ToArray() => _array ??= Copy();
+        public T[] ToArray() => Volatile.Read(ref _array) ?? PublishCopy();
+
+        private T[] PublishCopy()
+        {
+            var copy = Copy();
+            return Interlocked.CompareExchange(ref _array, copy, null) ?? copy;
+        }
 
         private T[] Copy()
         {

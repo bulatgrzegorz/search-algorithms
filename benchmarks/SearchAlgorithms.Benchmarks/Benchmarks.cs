@@ -94,24 +94,38 @@ internal static class Writer
 public class TypeaheadBenchmarks
 {
     private const int TopN = 10;
+    private const int ChurnPool = 1000;
 
     [ParamsAllValues] public Scale Size;
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
+    [Params(0, 1000)] public int WritesPerSecond;
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
     private ISearchAlgorithm _algorithm = null!;
     private string[] _prefixes = [], _fragments = [];
     private int _next;
+    private readonly CancellationTokenSource _stop = new();
+    private Task _writer = Task.CompletedTask;
 
     [GlobalSetup]
     public void Setup()
     {
-        var items = Dataset.Load((int)Size);
+        var all = Dataset.Load((int)Size + ChurnPool);
+        var items = all[..(int)Size];
         _algorithm = Algorithms.All[Algorithm](items);
         (_prefixes, _, _fragments) = Dataset.Queries(items);
+        if (WritesPerSecond > 0) _writer = Task.Run(() => Console.WriteLine(
+            $"Writer: {Writer.Run(_algorithm, items[..ChurnPool], all[(int)Size..], WritesPerSecond, _stop.Token):N0} writes/s achieved, target {WritesPerSecond}"));
     }
 
-    [GlobalCleanup] public Task Cleanup() => _algorithm.DisposeAsync().AsTask();
+    [GlobalCleanup]
+    public async Task Cleanup()
+    {
+        await _stop.CancelAsync();
+        await _writer;
+        await _algorithm.DisposeAsync();
+        _stop.Dispose();
+    }
 
     [Benchmark] public long StartsWith() => Type(_prefixes, static (a, q) => a.GetByStartsWith(q));
     [Benchmark] public long Filter() => Type(_fragments, static (a, q) => a.Filter(q));
