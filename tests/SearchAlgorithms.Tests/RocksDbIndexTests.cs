@@ -6,12 +6,12 @@ public class RocksDbIndexTests
     [Fact]
     public async Task StartsAndEndsWithAfterAddsAndRemoves()
     {
-        await using var index = new RocksDbIndex(["ada", "jon", "jan"]);
+        await using var index = new RocksDbIndex(Items("ada", "jon", "jan"));
 
-        index.Add("george");
-        index.Add("ada");
-        index.Remove("jan");
-        index.Add("sran");
+        index.Add(E("george"));
+        index.Add(E("ada"));
+        index.Remove(E("jan"));
+        index.Add(E("sran"));
 
         AssertItems(index.GetByStartsWith("j"), "jon");
         AssertItems(index.GetByEndsWith("an"), "sran");
@@ -20,7 +20,7 @@ public class RocksDbIndexTests
     [Fact]
     public async Task IsCaseSensitive()
     {
-        await using var index = new RocksDbIndex(["AB01", "ab02"]);
+        await using var index = new RocksDbIndex(Items("AB01", "ab02"));
 
         AssertItems(index.GetByStartsWith("AB"), "AB01");
         AssertItems(index.GetByEndsWith("B01"), "AB01");
@@ -30,7 +30,7 @@ public class RocksDbIndexTests
     [Fact]
     public async Task ItemWithRepeatedFragmentComesBackOnce()
     {
-        await using var index = new RocksDbIndex(["US99", "GB19", "AAAA"]);
+        await using var index = new RocksDbIndex(Items("US99", "GB19", "AAAA"));
 
         AssertItems(index.Filter("9"), "US99", "GB19");
         AssertItems(index.Filter("AA"), "AAAA");
@@ -40,14 +40,14 @@ public class RocksDbIndexTests
     [Fact]
     public async Task MultiCharRepeatsComeBackOnceAndRemoveFully()
     {
-        await using var index = new RocksDbIndex(["ABAB", "XABX"]);
+        await using var index = new RocksDbIndex(Items("ABAB", "XABX"));
 
         AssertItems(index.Filter("AB"), "ABAB", "XABX");
         AssertItems(index.Filter("BA"), "ABAB");
         AssertItems(index.Filter("ABA"), "ABAB");
         AssertItems(index.Filter("ABAB"), "ABAB");
 
-        index.Remove("ABAB");
+        index.Remove(E("ABAB"));
         AssertItems(index.Filter("B"), "XABX");
         Assert.Empty(index.Filter("BA"));
     }
@@ -57,16 +57,16 @@ public class RocksDbIndexTests
     [Fact]
     public async Task FilterSeesOnePointInTime()
     {
-        await using var index = new RocksDbIndex(["ACXX"]);
+        await using var index = new RocksDbIndex(Items("ACXX"));
         using var stop = new CancellationTokenSource();
         var writer = Task.Run(() =>
         {
             while (!stop.IsCancellationRequested)
             {
-                index.Remove("ACXX");
-                index.Add("ABAC");
-                index.Remove("ABAC");
-                index.Add("ACXX");
+                index.Remove(E("ACXX"));
+                index.Add(E("ABAC"));
+                index.Remove(E("ABAC"));
+                index.Add(E("ACXX"));
             }
         });
 
@@ -85,7 +85,7 @@ public class RocksDbIndexTests
     [Fact]
     public async Task ResultsReadByIndexMatchEnumeration()
     {
-        await using var index = new RocksDbIndex(["", "A", "AB01", "Zażółć"]);
+        await using var index = new RocksDbIndex(Items("", "A", "AB01", "Zażółć"));
 
         foreach (var hits in new[] { index.GetByStartsWith(""), index.GetByEndsWith(""), index.Filter("") })
         {
@@ -99,9 +99,9 @@ public class RocksDbIndexTests
     [Fact]
     public async Task AddedItemIsFoundRightAway()
     {
-        await using var index = new RocksDbIndex(["AB01"]);
+        await using var index = new RocksDbIndex(Items("AB01"));
 
-        index.Add("CD01");
+        index.Add(E("CD01"));
 
         AssertItems(index.GetByStartsWith("CD"), "CD01");
         AssertItems(index.Filter("D0"), "CD01");
@@ -110,9 +110,9 @@ public class RocksDbIndexTests
     [Fact]
     public async Task AddingExistingItemDoesNothing()
     {
-        await using var index = new RocksDbIndex(["AB01"]);
+        await using var index = new RocksDbIndex(Items("AB01"));
 
-        index.Add("AB01");
+        index.Add(E("AB01"));
 
         AssertItems(index.Filter("B"), "AB01");
     }
@@ -120,20 +120,20 @@ public class RocksDbIndexTests
     [Fact]
     public async Task RemovedItemIsGoneAndReaddedItemIsBack()
     {
-        await using var index = new RocksDbIndex(["AB01", "AB02"]);
+        await using var index = new RocksDbIndex(Items("AB01", "AB02"));
 
-        index.Remove("AB01");
-        index.Remove("ZZ99"); // missing: does nothing
+        index.Remove(E("AB01"));
+        index.Remove(E("ZZ99")); // missing: does nothing
         AssertItems(index.Filter("AB"), "AB02");
 
-        index.Add("AB01");
+        index.Add(E("AB01"));
         AssertItems(index.Filter("B0"), "AB01", "AB02");
     }
 
     [Fact]
     public async Task EmptyIndexFindsNothing()
     {
-        await using var index = new RocksDbIndex([]);
+        await using var index = new RocksDbIndex(Items());
 
         Assert.Empty(index.GetByStartsWith("A"));
         Assert.Empty(index.GetByEndsWith("A"));
@@ -144,8 +144,8 @@ public class RocksDbIndexTests
     [Fact]
     public async Task EmptyQueryFindsEverythingIncludingEmptyItem()
     {
-        await using var index = new RocksDbIndex(["AB01", "CD02", ""]);
-        index.Remove("CD02");
+        await using var index = new RocksDbIndex(Items("AB01", "CD02", ""));
+        index.Remove(E("CD02"));
 
         AssertItems(index.GetByStartsWith(""), "AB01", "");
         AssertItems(index.GetByEndsWith(""), "AB01", "");
@@ -158,7 +158,7 @@ public class RocksDbIndexTests
     public async Task MatchesNonAsciiItemsByChars()
     {
         string[] items = ["Zażółć", "zółw", "a😀b", "😀", "x�"];
-        await using var index = new RocksDbIndex(items);
+        await using var index = new RocksDbIndex(Items(items));
 
         foreach (var q in new[] { "ż", "ół", "ć", "😀", "😀b", "a😀", "�", "Z", "w" })
         {
@@ -171,7 +171,7 @@ public class RocksDbIndexTests
     [Fact]
     public async Task NaiveIndexHandlesEmptyQueriesAndNonAscii()
     {
-        await using var index = new NaiveRocksDbIndex(["Zażółć", "zółw", ""]);
+        await using var index = new NaiveRocksDbIndex(Items("Zażółć", "zółw", ""));
 
         AssertItems(index.GetByStartsWith(""), "Zażółć", "zółw", "");
         AssertItems(index.GetByStartsWith("Za"), "Zażółć");
@@ -182,8 +182,8 @@ public class RocksDbIndexTests
     [Fact]
     public async Task InstancesAliveAtTheSameTimeDoNotShareData()
     {
-        await using var first = new RocksDbIndex(["AB01"]);
-        await using var second = new RocksDbIndex(["CD01"]);
+        await using var first = new RocksDbIndex(Items("AB01"));
+        await using var second = new RocksDbIndex(Items("CD01"));
 
         AssertItems(first.Filter("01"), "AB01");
         AssertItems(second.Filter("01"), "CD01");
@@ -192,15 +192,20 @@ public class RocksDbIndexTests
     [Fact]
     public async Task NewInstanceDoesNotSeeDisposedInstanceData()
     {
-        await using (var first = new RocksDbIndex(["AB01"]))
-            first.Add("AB02");
+        await using (var first = new RocksDbIndex(Items("AB01")))
+            first.Add(E("AB02"));
 
-        await using var second = new RocksDbIndex(["CD01"]);
+        await using var second = new RocksDbIndex(Items("CD01"));
 
         Assert.Empty(second.GetByStartsWith("AB"));
         AssertItems(second.GetByStartsWith("CD"), "CD01");
     }
 
-    static void AssertItems(IReadOnlyList<string> actual, params string[] expected) =>
-        Assert.Equal(expected.Order(), actual.Order());
+    // Ids from the Key, so cases read as Keys; hash codes vary in sign and size, so every Id byte gets round-tripped.
+    static Entry E(string key) => new(key, key.GetHashCode());
+
+    static Entry[] Items(params string[] keys) => [.. keys.Select(k => E(k))];
+
+    static void AssertItems(IReadOnlyList<Entry> actual, params string[] expected) =>
+        Assert.Equal(Items(expected).OrderBy(x => x.Key, StringComparer.Ordinal), actual.OrderBy(x => x.Key, StringComparer.Ordinal));
 }

@@ -3,8 +3,9 @@ namespace SearchAlgorithms.Tests;
 // Every registered algorithm must return exactly what a plain LINQ scan returns (order ignored).
 public class AlgorithmTests
 {
-    static readonly string[] Items = GenerateItems(1);
-    static readonly string[] Others = GenerateItems(2).Except(Items).ToArray();
+    static readonly Entry[] Items = GenerateItems(1, firstId: 0);
+    // Other Ids, so where a Key repeats one of Items', adding it is another entity and removing it must keep Items' one.
+    static readonly Entry[] Others = GenerateItems(2, firstId: 10_000);
 
     public static TheoryData<string> Names => new(Algorithms.All.Keys);
 
@@ -29,6 +30,21 @@ public class AlgorithmTests
             else { algorithm.Remove(item); expected.Remove(item); }
         }
         AssertMatches(expected, algorithm);
+    }
+
+    // Ids at the int edges, so every byte of an encoded Id round-trips.
+    [Theory, MemberData(nameof(Names))]
+    public async Task EntriesSharingAKeyStaySeparate(string name)
+    {
+        await using var algorithm = Algorithms.All[name]([new("AB01", -1), new("AB01", int.MaxValue), new("XAB0", int.MinValue)]);
+
+        algorithm.Remove(new("AB01", 5)); // missing: same Key, other Id
+        Assert.Equal(2, algorithm.GetByStartsWith("AB").Count);
+
+        algorithm.Remove(new("AB01", -1));
+        Assert.Equal(new[] { new Entry("AB01", int.MaxValue) }, algorithm.GetByStartsWith("AB"));
+        Assert.Equal(new[] { new Entry("AB01", int.MaxValue) }, algorithm.GetByEndsWith("01"));
+        Assert.Equal(new[] { new Entry("XAB0", int.MinValue), new Entry("AB01", int.MaxValue) }, Sorted(algorithm.Filter("AB0")));
     }
 
     [Theory, MemberData(nameof(Names))]
@@ -57,23 +73,25 @@ public class AlgorithmTests
         AssertMatches(Items, algorithm); // every writer round ends with Others removed again
     }
 
-    static void AssertMatches(IEnumerable<string> items, ISearchAlgorithm algorithm)
+    static void AssertMatches(IEnumerable<Entry> items, ISearchAlgorithm algorithm)
     {
         foreach (var q in Queries())
         {
-            Assert.Equal(items.Where(x => x.StartsWith(q, StringComparison.Ordinal)).Order(), algorithm.GetByStartsWith(q).Order());
-            Assert.Equal(items.Where(x => x.EndsWith(q, StringComparison.Ordinal)).Order(), algorithm.GetByEndsWith(q).Order());
-            Assert.Equal(items.Where(x => x.Contains(q, StringComparison.Ordinal)).Order(), algorithm.Filter(q).Order());
+            Assert.Equal(Sorted(items.Where(x => x.Key.StartsWith(q, StringComparison.Ordinal))), Sorted(algorithm.GetByStartsWith(q)));
+            Assert.Equal(Sorted(items.Where(x => x.Key.EndsWith(q, StringComparison.Ordinal))), Sorted(algorithm.GetByEndsWith(q)));
+            Assert.Equal(Sorted(items.Where(x => x.Key.Contains(q, StringComparison.Ordinal))), Sorted(algorithm.Filter(q)));
         }
     }
 
+    static IEnumerable<Entry> Sorted(IEnumerable<Entry> entries) => entries.OrderBy(x => x.Id).ThenBy(x => x.Key, StringComparer.Ordinal);
+
     // Small alphabet and mixed lengths so queries overlap a lot and hit edge cases (whole item, 1 char, misses).
-    static string[] GenerateItems(int seed)
+    // Keys repeat (there are only 4 + 16 + 64 of up to 3 chars), each with its own Id.
+    static Entry[] GenerateItems(int seed, int firstId)
     {
         var rnd = new Random(seed);
-        return Enumerable.Range(0, 2000)
-            .Select(_ => new string(Enumerable.Range(0, rnd.Next(1, 13)).Select(_ => "AB01"[rnd.Next(4)]).ToArray()))
-            .Distinct()
+        return Enumerable.Range(firstId, 2000)
+            .Select(id => new Entry(new string(Enumerable.Range(0, rnd.Next(1, 13)).Select(_ => "AB01"[rnd.Next(4)]).ToArray()), id))
             .ToArray();
     }
 
@@ -82,7 +100,7 @@ public class AlgorithmTests
         var rnd = new Random(2);
         for (var i = 0; i < 200; i++)
         {
-            var item = Items[rnd.Next(Items.Length)];
+            var item = Items[rnd.Next(Items.Length)].Key;
             var start = rnd.Next(item.Length);
             yield return item[start..rnd.Next(start + 1, item.Length + 1)];
         }

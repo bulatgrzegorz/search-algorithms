@@ -20,7 +20,7 @@ internal static class LatencyRun
         var all = Dataset.Load((int)size + ChurnPool);
         var items = all[..(int)size];
         var (prefixes, suffixes, fragments) = Dataset.Queries(items);
-        (string Name, string[] Queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> Search)[] kinds =
+        (string Name, string[] Queries, Func<ISearchAlgorithm, string, IReadOnlyList<Entry>> Search)[] kinds =
         [
             ("StartsWith", prefixes, static (a, q) => a.GetByStartsWith(q)),
             ("EndsWith", suffixes, static (a, q) => a.GetByEndsWith(q)),
@@ -56,7 +56,7 @@ internal static class LatencyRun
 
     // Each query's latency in Stopwatch ticks, from when it was due to when it returned.
     // Reads only .Count, like SearchBenchmarks, so the numbers compare.
-    private static long[] Measure(ISearchAlgorithm algorithm, string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search, int rate, int seconds)
+    private static long[] Measure(ISearchAlgorithm algorithm, string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<Entry>> search, int rate, int seconds)
     {
         var latencies = new long[rate * seconds];
         using var done = new CountdownEvent(latencies.Length);

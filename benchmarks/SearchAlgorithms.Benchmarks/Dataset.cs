@@ -9,22 +9,24 @@ public static class Dataset
     public static string Name => Environment.GetEnvironmentVariable("DATASET") is { Length: > 0 } name ? name : "isin";
 
     // First `count` of a seeded shuffle, so Small ⊂ Medium ⊂ Huge and items past a size are real items not yet in the set.
-    // A count past the file's end loads all of it.
-    public static string[] Load(int count)
+    // Ids are positions in that shuffle, so the same line gets the same Id at every size. A count past the file's end loads all of it.
+    public static Entry[] Load(int count)
     {
-        var items = File.ReadAllLines(Find($"{Name}.txt"));
-        new Random(42).Shuffle(items); // source is grouped (by issuer, alphabetically); shuffle so each size is a fair sample
-        return items[..Math.Min(count, items.Length)];
+        var keys = File.ReadAllLines(Find($"{Name}.txt"));
+        new Random(42).Shuffle(keys); // source is grouped (by issuer, alphabetically); shuffle so each size is a fair sample
+        var items = new Entry[Math.Min(count, keys.Length)];
+        for (var i = 0; i < items.Length; i++) items[i] = new Entry(keys[i], i);
+        return items;
     }
 
     // Cut from random items so queries hit; fixed seed so every algorithm gets the same queries.
-    public static (string[] Prefixes, string[] Suffixes, string[] Fragments) Queries(string[] items, int count = 1000)
+    public static (string[] Prefixes, string[] Suffixes, string[] Fragments) Queries(Entry[] items, int count = 1000)
     {
         var rnd = new Random(7);
         var (prefixes, suffixes, fragments) = (new string[count], new string[count], new string[count]);
         for (var i = 0; i < count; i++)
         {
-            var item = items[rnd.Next(items.Length)];
+            var item = items[rnd.Next(items.Length)].Key;
             var len = Math.Min(rnd.Next(3, 7), item.Length);
             prefixes[i] = item[..len];
             suffixes[i] = item[^len..];
