@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An illustrated, interactive walkthrough of SortedArrayIndex.cs, using real strings at every step.">
+  <title>SortedArrayIndex, step by step</title>
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/walkthrough.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the walkthrough</a>
+<header class="topbar">
+  <a class="brand" href="index.html"><span class="brand-icon" aria-hidden="true">[↗]</span> Search, illustrated</a>
+  <nav class="top-links"><a href="index.html">All algorithms</a><a href="index.html#benchmarks">Benchmarks</a><a class="source-link" href="https://github.com/bulatgrzegorz/search-algorithms/blob/main/src/SearchAlgorithms/SortedArrayIndex.cs">C# source ↗</a></nav>
+</header>
+<div class="layout">
+<aside class="sidebar" aria-label="On this page">
+  <a class="back-link" href="index.html">← All algorithms</a>
+  <p class="eyebrow">THE WALKTHROUGH</p>
+  <nav>
+    <a href="#idea"><span>01</span> One collection, three views</a>
+    <a href="#build"><span>02</span> Build the views</a>
+    <a href="#boundaries"><span>03</span> Find both edges</a>
+    <a href="#contains"><span>04</span> Search inside a string</a>
+    <a href="#changes"><span>05</span> Add &amp; remove</a>
+    <a href="#merge"><span>06</span> Fold changes into the base</a>
+    <a href="#readers"><span>07</span> Readers &amp; writers</a>
+    <a href="#connect"><span>08</span> Follow a whole request</a>
+    <a href="#reference"><span>09</span> Back to the code</a>
+  </nav>
+  <div class="sidebar-note">No algorithm background needed.<br>Read down, then try the controls.<br><strong>Every position starts at 0.</strong></div>
+</aside>
+<main id="main">
+  <section class="hero" aria-labelledby="title">
+    <p class="eyebrow">A VISUAL GUIDE TO <code>SortedArrayIndex.cs</code></p>
+    <h1>How a string becomes <br>a <em>search result.</em></h1>
+    <p class="lead">Start with <code>GB19</code>, <code>US12</code>, and <code>US99</code>. See how this class arranges them, finds them, and keeps searching while the collection changes.</p>
+    <a class="primary-link" href="#idea">Start with three strings <span aria-hidden="true">↓</span></a>
+    <div class="hero-figure" aria-label="Searching US returns US12 and US99, while GB19 is outside the matching block.">
+      <div class="query-tag">Starts with <strong>"US"</strong></div>
+      <div class="array hero-array"><div class="cell muted"><small>0</small>GB19</div><div class="cell hit"><small>1 · start</small><b>US</b>12</div><div class="cell hit"><small>2</small><b>US</b>99</div><div class="edge-label">3<br><small>end</small></div></div>
+      <p>Arrange once. Find the edges. Return the block.</p>
+    </div>
+    <p class="reading-note">Part 2 of <a href="index.html">Search, illustrated</a> · Play / pause and step controls · Exact string examples</p>
+  </section>
+
+  <noscript><div class="note">JavaScript is off. All written explanations and static examples are available; enable JavaScript for the interactive step players.</div></noscript>
+
+  <section id="idea" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">01</span><h2>One collection, three ways to arrange it</h2></div>
+    <p>We have these three unique strings: <code>GB19</code>, <code>US12</code>, <code>US99</code>. A plain scan would check each string for every request. This class does extra work up front so that each kind of search can jump to a smaller part of the data.</p>
+    <p>An <strong>index</strong> here is an arranged view of those strings. Think of three lists that answer three different questions:</p>
+    <div class="view-grid">
+      <article><span class="view-label">STARTS WITH</span><h3>"US" → US12, US99</h3><p>Sort by reading from the <strong>left</strong>.</p><div class="mini-array"><span>GB19</span><span class="hit">US12</span><span class="hit">US99</span></div><p class="caption"><code>ByPrefix</code>: the US strings sit together.</p></article>
+      <article><span class="view-label">ENDS WITH</span><h3>"9" → GB19, US99</h3><p>Sort by reading from the <strong>right</strong>.</p><div class="mini-array"><span>US12</span><span class="hit">GB19</span><span class="hit">US99</span></div><p class="caption"><code>BySuffix</code>: strings ending in 9 sit together.</p></article>
+      <article><span class="view-label">CONTAINS</span><h3>"9" → GB19, US99</h3><p>Arrange the text starting at <strong>each position</strong>.</p><div class="mini-array"><span class="hit">9 <small>GB19</small></span><span class="hit">9 <small>US99</small></span><span class="hit">99 <small>US99</small></span></div><p class="caption"><code>Substrings</code>: find the block, then remove repeated hits.</p></article>
+    </div>
+    <div class="note"><strong>One rule makes all three work.</strong> In the right arrangement, all the matches are neighbors. We only need to find where that group starts and ends.</div>
+    <h3>What does “sorted” mean for these strings?</h3>
+    <p>Comparisons are <strong>ordinal and case-sensitive</strong>: compare the numeric UTF-16 values of the characters, without language-specific alphabet rules. <code>"US12"</code> comes before <code>"US99"</code> because, after the shared <code>US</code>, <code>'1'</code> is smaller than <code>'9'</code>. <code>"us12"</code> does not start with <code>"US"</code>. There is no case folding or Unicode normalization.</p>
+    <div class="note"><strong>Strings stand in for entries.</strong> The index really stores <code>Entry(Key, Id)</code>: queries match the <code>Key</code>, and the caller gets the <code>Id</code> back to find its entity. Two entries may share a Key (two companies with one name); they then sort by Id. This page shows only the Keys, because every decision below is made on them.</div>
+    <p>The constructor first puts the input into a <code>HashSet&lt;Entry&gt;</code>. If we pass <code>["US99", "GB19", "US99", "US12"]</code>, the repeated <code>US99</code> disappears. We index <strong>three unique strings</strong>.</p>
+  </section>
+
+  <section id="build" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">02</span><h2>Build the views, with actual text</h2></div>
+    <p><code>Build</code> creates two arrays of references to the original strings, plus an array describing starting positions inside them. The three construction tasks run concurrently through <code>Parallel.Invoke</code>.</p>
+    <h3>The ending view reads right to left</h3>
+    <p>For <code>US12</code>, read <code>2 → 1 → S → U</code>. For <code>GB19</code>, read <code>9 → 1 → B → G</code>. For <code>US99</code>, read <code>9 → 9 → S → U</code>.</p>
+    <div class="table-scroll"><table><caption>How SuffixOrder arranges the original strings</caption><thead><tr><th>Original string</th><th>Read from the end</th><th>Why it is here</th></tr></thead><tbody><tr><td><code>US12</code></td><td><code>2 1 S U</code></td><td>Last character 2 comes before 9.</td></tr><tr><td><code>GB19</code></td><td><code>9 1 B G</code></td><td>Tied on the last 9; next character 1 comes before 9.</td></tr><tr><td><code>US99</code></td><td><code>9 9 S U</code></td><td>Follows GB19 after comparing the next character.</td></tr></tbody></table></div>
+    <p>Now every string ending in <code>"9"</code> is in one block: <code>[GB19, US99]</code>. To search for <code>"19"</code>, read the query from the right too: first <code>9</code>, then <code>1</code>. Only <code>GB19</code> matches. <strong>The code compares backward; it does not allocate reversed strings.</strong></p>
+
+    <h3>The inside view starts at every character</h3>
+    <p>To find <code>"S9"</code> inside <code>US99</code>, make the text at position 1 searchable. The same idea applies at every position:</p>
+    <div class="offset-example" aria-label="US99 has four UTF-16 character positions: 0 U, 1 S, 2 9, 3 9."><div><small>0</small>U</div><div><small>1</small>S</div><div><small>2</small>9</div><div><small>3</small>9</div></div>
+    <div class="table-scroll"><table><caption>Four entries from one string, US99</caption><thead><tr><th>Stored entry</th><th>Text used for sorting</th><th>What it can find</th></tr></thead><tbody><tr><td><code>(US99, 0)</code></td><td><code>US99</code></td><td>Fragments starting at U, such as "US".</td></tr><tr><td><code>(US99, 1)</code></td><td><code>S99</code></td><td>Fragments starting at S, such as "S9".</td></tr><tr><td><code>(US99, 2)</code></td><td><code>99</code></td><td>"9" or "99".</td></tr><tr><td><code>(US99, 3)</code></td><td><code>9</code></td><td>"9" again. We will handle this duplicate shortly.</td></tr></tbody></table></div>
+    <p>The struct is called <code>Substring</code>, but it stores <code>(Key, Id, Offset, Repeat)</code>, <strong>not a new copy of the text</strong>. For <code>(US99, 2, 0)</code>, the sorting code looks at <code>US99</code> starting at position 2 and sees <code>"99"</code>. A four-character string contributes four entries; our three strings contribute twelve. These are all starting positions, not every possible start/end pair.</p>
+
+    <div class="interactive" id="build-demo">
+      <div class="demo-heading"><div><span class="eyebrow">WATCH THE BUILD</span><h3>From three strings to twelve entries</h3></div><span class="demo-badge">SortedSubstrings</span></div>
+      <div class="demo-canvas" id="build-canvas"></div>
+      <div class="step-copy" id="build-copy" aria-live="polite"></div>
+      <div class="player" data-player="build"><button type="button" data-action="reset" aria-label="Restart build animation">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <details><summary>Why count first, then sort the buckets?</summary><div class="detail-body">
+      <p>Imagine putting entries into trays labeled by their first character. The <code>'9'</code> tray gets <code>"9" from GB19</code>, <code>"99" from US99</code>, and <code>"9" from US99</code>. A <code>'1'</code> tray gets <code>"19"</code> and <code>"12"</code>. Entries beginning with 1 must come before entries beginning with 9, regardless of the remaining characters.</p>
+      <ol><li><strong>Count.</strong> <code>start[c + 1]++</code> counts how many entries begin with character <code>c</code>. For '9', the count is 3.</li><li><strong>Add the counts cumulatively.</strong> There are three entries before the '9' tray: "12", "19", "2". So <code>start['9'] = 3</code>, <code>start['9' + 1] = 6</code>. Its reserved slice is <code>[3, 6)</code>.</li><li><strong>Fill.</strong> <code>next</code> starts as a copy of <code>start</code>. Each '9' entry occupies the next free position in that tray; incrementing <code>next['9']</code> moves its cursor.</li><li><strong>Sort each tray.</strong> "9" precedes "99" because the shorter text runs out first. Equal text is ordered by the original Key, then Id: GB19 before US99. Trays with one entry need no sort.</li><li><strong>Fill Repeat.</strong> After sorting, calculate the duplicate information for each entry in parallel. Repeat does not affect sorting.</li></ol>
+      <p>This is a counting-sort step followed by comparison sorts inside buckets. There are 65,536 possible UTF-16 code units; the <code>start</code> array has 65,537 slots so even the last bucket has an end position. Larger buckets are scheduled first, with <code>NoBuffering</code>, to avoid leaving a big sort until other workers are idle. The final arrangement is the same whichever worker finishes first.</p>
+    </div></details>
+    <details><summary>Current constructor limitation: [] or only empty strings</summary><div class="detail-body"><p>The search rules can handle an empty view, and an empty string can be indexed alongside nonempty strings. However, constructing this version with <code>[]</code> or <code>[""]</code> throws: SortedSubstrings eventually calls <code>Partitioner.Create(0, 0)</code>, which requires a nonempty range. At least one initial string must contain a UTF-16 code unit. This is an existing implementation limitation, not a requirement of binary search. Removing all strings after a successful construction can still produce an empty logical collection.</p></div></details>
+  </section>
+
+  <section id="boundaries" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">03</span><h2>Find the two edges of "US"</h2></div>
+    <p>In <code>[GB19, US12, US99]</code>, the matching strings start at position 1 and stop just before position 3. We write this as <code>[1, 3)</code>: <strong>include 1, exclude 3</strong>. The count is <code>3 − 1 = 2</code>. Position 3 is a gap after the array, not another item.</p>
+    <div class="static-block"><div class="array"><div class="cell muted"><small>0 · before</small>GB19</div><div class="cell hit"><small>1 · start</small>US12</div><div class="cell hit"><small>2 · match</small>US99</div><div class="edge-label">3<small>end →</small></div></div><p><code>FindBlock</code> returns <code>ArraySegment(ByPrefix, 1, 2)</code>: a window onto those two array entries.</p></div>
+    <p><strong>Binary search</strong> checks the middle of the remaining range. Because the strings are arranged, a comparison tells us which whole side cannot contain the edge. We discard that side and repeat. We do this twice: once for the start, once for the end.</p>
+    <p>When comparing against <code>"US"</code>, <code>GB19</code> is <strong>before</strong> the block, while both <code>US12</code> and <code>US99</code> count as <strong>matching</strong>. We compare just enough characters for the query. We are looking for the edges of a group, rather than stopping at the first match.</p>
+
+    <div class="interactive" id="search-demo">
+      <div class="demo-heading"><div><span class="eyebrow">TRY THE TWO SEARCHES</span><h3>Watch the possible range shrink</h3></div><span class="demo-badge">FindBlock · Boundary</span></div>
+      <div class="input-row"><label>Search kind<select id="search-kind"><option value="prefix">Starts with</option><option value="suffix">Ends with</option><option value="contains">Contains</option></select></label><label>Query<input id="search-query" value="US" autocomplete="off" spellcheck="false" maxlength="40"></label><label>Strings<select id="search-dataset"><option value="source">GB19, US12, US99</option><option value="larger">Ten strings (more search steps)</option><option value="repeated">Empty &amp; repeated strings</option><option value="empty">Empty view (boundary helper)</option></select></label></div>
+      <div class="presets"><span>Examples:</span><button type="button" data-search-preset="prefix:US">starts "US"</button><button type="button" data-search-preset="suffix:19">ends "19"</button><button type="button" data-search-preset="contains:9">contains "9"</button><button type="button" data-search-preset="prefix:ZZ">no match</button><button type="button" data-search-preset="contains:">empty query</button></div>
+      <div class="legend"><span><i class="legend-active"></i>still possible</span><span><i class="legend-probe"></i>middle being tested</span><span><i class="legend-hit"></i>matching block / result</span><span>Dimmed = outside this search range</span></div>
+      <div class="demo-canvas" id="search-canvas"></div>
+      <div class="step-copy" id="search-copy" aria-live="polite"></div>
+      <div class="player" data-player="search"><button type="button" data-action="reset" aria-label="Restart search animation">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+      <p class="caption">Contains also has a finishing step to remove duplicate entries. This simulator uses the same UTF-16 ordering and boundary rules as the C# class; it runs locally in JavaScript.</p>
+    </div>
+    <h3>Why the unusual <code>~BinarySearch(...)</code>?</h3>
+    <p>The code supplies a pretend <code>Boundary</code> value. The start boundary sorts just before all matches; the end boundary sorts just after all matches. It always compares as <code>+1</code> or <code>−1</code>, never 0, so <code>BinarySearch</code> always reports “not found.” The useful part is <em>where that boundary would be inserted</em>.</p>
+    <div class="equation"><span>Start boundary belongs at <b>1</b></span><span aria-hidden="true">→</span><span>BinarySearch returns <b>−2</b></span><span aria-hidden="true">→</span><span><code>~(−2)</code> gives <b>1</b></span></div>
+    <p>The <code>~</code> operator is a bitwise complement. .NET encodes an unsuccessful search as <code>~insertionPosition</code>; applying <code>~</code> again recovers the position. For the end, the code searches only the slice starting at <code>start</code>, then adds <code>start</code> back. Here the local end position is 2, so the absolute end is <code>1 + 2 = 3</code>.</p>
+    <p>With <code>"FR"</code>, the insertion position for both edges is 0: <code>[0, 0)</code>, an empty result. With <code>"ZZ"</code>, both are 3: <code>[3, 3)</code>. With <code>""</code>, all strings match, even an empty string.</p>
+    <details><summary>Compare for sorting versus compare for matching</summary><div class="detail-body"><p><code>PrefixOrder.Compare("US12", "US99")</code> is negative: it must distinguish two items for sorting. <code>PrefixOrder.CompareToQuery("US12", "US")</code> and <code>CompareToQuery("US99", "US")</code> are both 0: they belong to the same query block.</p><p><code>Boundary.CompareTo</code> reverses that item-versus-query relationship because .NET is asking how the boundary compares to the item. The start boundary goes left on a match; the end boundary goes right. <code>IOrder&lt;T&gt;</code> lets the same <code>FindBlock</code> machinery use the prefix, suffix, or substring comparison rule. These are struct comparers; the generic implementation allows specialized comparisons without a separate search implementation for every view.</p><p>A short item behaves correctly too: <code>"U"</code> comes before a search for <code>"US"</code>, because the item runs out before the query is fully matched.</p></div></details>
+  </section>
+
+  <section id="contains" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">04</span><h2>"US99" contains "9" twice. Return it once.</h2></div>
+    <p>Searching inside a string becomes a starts-with search on its starting positions. <code>US99.Contains("S9")</code> is true because the entry <code>(US99, 1)</code> has text <code>"S99"</code>, which starts with <code>"S9"</code>.</p>
+    <p>For <code>Filter("9")</code>, the sorted entries are:</p>
+    <div class="table-scroll"><table><caption>The complete Substrings array for GB19, US12, US99</caption><thead><tr><th>Position</th><th>Text being compared</th><th>Stored item, offset</th><th>Repeat</th></tr></thead><tbody>
+      <tr><td>0</td><td><code>12</code></td><td>US12, 2</td><td>0</td></tr><tr><td>1</td><td><code>19</code></td><td>GB19, 2</td><td>0</td></tr><tr><td>2</td><td><code>2</code></td><td>US12, 3</td><td>0</td></tr>
+      <tr class="match-row"><td>3 · start</td><td><code>9</code></td><td>GB19, 3</td><td>0 → keep</td></tr><tr class="match-row"><td>4</td><td><code>9</code></td><td>US99, 3</td><td>1 → skip for "9"</td></tr><tr class="match-row"><td>5</td><td><code>99</code></td><td>US99, 2</td><td>0 → keep</td></tr>
+      <tr><td>6 · end</td><td><code>B19</code></td><td>GB19, 1</td><td>0</td></tr><tr><td>7</td><td><code>GB19</code></td><td>GB19, 0</td><td>0</td></tr><tr><td>8</td><td><code>S12</code></td><td>US12, 1</td><td>0</td></tr><tr><td>9</td><td><code>S99</code></td><td>US99, 1</td><td>0</td></tr><tr><td>10</td><td><code>US12</code></td><td>US12, 0</td><td>0</td></tr><tr><td>11</td><td><code>US99</code></td><td>US99, 0</td><td>0</td></tr>
+    </tbody></table></div>
+    <p><code>FindBlock</code> gives <code>[3, 6)</code>: three matching entries, but only two unique strings. Here is how <code>RepeatAt</code> makes that easy to fix without building a new set for every query.</p>
+    <div class="repeat-picture"><div><span class="view-label">EARLIER POSITION 2</span><div class="letter-line"><span>U</span><span>S</span><strong>9</strong><strong>9</strong></div><p>Text: <code>"99"</code></p></div><span class="big-arrow" aria-hidden="true">↔</span><div><span class="view-label">LATER POSITION 3</span><div class="letter-line"><span>U</span><span>S</span><span>9</span><strong>9</strong></div><p>Text: <code>"9"</code></p></div></div>
+    <p>The text at position 3, <code>"9"</code>, shares one starting character with the text at position 2, <code>"99"</code>. No earlier position shares more. So <code>RepeatAt("US99", 3) = 1</code>.</p>
+    <div class="note"><strong>Keep a matching entry only when <code>fragment.Length &gt; Repeat</code>.</strong><br>For "9": length 1 is not greater than Repeat 1, so skip position 3. Position 2 has Repeat 0, so keep it. We return US99 once.</div>
+    <p>This number is calculated <strong>within the same original string</strong>, not by comparing neighboring entries in the sorted array. That matters: the two entries with text <code>"9"</code> belonging to different strings must both remain eligible.</p>
+    <div class="interactive" id="repeat-demo">
+      <div class="demo-heading"><div><span class="eyebrow">TRY REPEATED TEXT</span><h3>Which occurrence gets to represent the string?</h3></div><span class="demo-badge">RepeatAt · Filter</span></div>
+      <div class="input-row"><label>Original string<input id="repeat-item" value="US99" maxlength="24" spellcheck="false"></label><label>Fragment<input id="repeat-query" value="9" maxlength="24" spellcheck="false"></label></div>
+      <div class="presets"><span>Examples:</span><button type="button" data-repeat-preset="US99:9">US99 / 9</button><button type="button" data-repeat-preset="US99:99">US99 / 99</button><button type="button" data-repeat-preset="AAAA:AA">AAAA / AA</button><button type="button" data-repeat-preset="BANANA:ANA">BANANA / ANA</button></div>
+      <div id="repeat-canvas" class="demo-canvas" aria-live="polite"></div>
+    </div>
+    <p>For <code>"AAAA"</code>, the entries starting at offsets 0, 1, 2, 3 have Repeat values <code>0, 3, 2, 1</code>. With <code>"AA"</code>, offsets 0, 1, and 2 match. Only offset 0 passes <code>2 &gt; Repeat</code>. The first occurrence represents the string, even when occurrences overlap.</p>
+    <h3>What if US99 was removed or FR99 was just added?</h3>
+    <ol class="explain-steps"><li><strong>Find base hits.</strong> For "9", get GB19 at offset 3, US99 at offset 3, and US99 at offset 2.</li><li><strong>Locate the removed string’s representative.</strong> If US99 is in Removed, <code>US99.IndexOf("9")</code> gives 2. Binary-search <code>(US99, 2)</code> within the matching block: its <em>block-relative</em> position is 2. Save that in <code>removedAt</code>.</li><li><strong>Walk the block.</strong> Keep GB19. Skip the later occurrence of US99 using Repeat. Skip its first occurrence because its position is in removedAt. Sorting removedAt lets one cursor follow all removals.</li><li><strong>Check pending additions directly.</strong> <code>FR99.Contains("9")</code> is true, so append FR99 once. Added strings are never in Base, so they cannot repeat a base hit. Result: <code>[GB19, FR99]</code>.</li></ol>
+    <p>The small Added and Removed collections have prefix and suffix arrays, but no substring index. For contains searches, the code uses <code>IndexOf</code> on removals and <code>Contains</code> on additions. This keeps each write from copying a substring index for the pending changes.</p>
+    <p><strong>The empty fragment is special.</strong> Every string contains <code>""</code>, including <code>""</code> itself. An empty string has zero starting-position entries. Therefore <code>Filter("")</code> delegates to <code>GetByStartsWith("")</code>, which includes it.</p>
+  </section>
+
+  <section id="changes" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">05</span><h2>Add "FR77" without rebuilding everything</h2></div>
+    <p>Inserting into a large sorted array can move many entries. Instead, keep the large arrays unchanged and collect small pending changes beside them. <code>State</code> holds these three pieces:</p>
+    <div class="state-diagram"><div><span class="view-label">BASE</span><strong>GB19 · US12 · US99</strong><p>The last built arrays.</p></div><span aria-hidden="true">+</span><div class="added-box"><span class="view-label">ADDED</span><strong>FR77</strong><p>New strings absent from Base.</p></div><span aria-hidden="true">−</span><div class="removed-box"><span class="view-label">REMOVED</span><strong>US12</strong><p>Strings still in Base, hidden from searches.</p></div></div>
+    <p>The logical collection is now <code>[FR77, GB19, US99]</code>. The Base arrays still physically contain US12. A search consults the pending changes, so it already sees the current collection.</p>
+    <div class="interactive" id="mutation-demo">
+      <div class="demo-heading"><div><span class="eyebrow">CHANGE THE COLLECTION</span><h3>Try a write, then search immediately</h3></div><span class="demo-badge">Add · Remove · WithDelta</span></div>
+      <div class="input-row"><label>String to change<input id="mutation-item" value="FR77" maxlength="24" spellcheck="false"></label><div class="button-group"><button type="button" id="mutation-add">Add string</button><button type="button" id="mutation-remove">Remove string</button><button type="button" id="mutation-reset">Reset example</button></div></div>
+      <div class="presets"><span>Try:</span><button type="button" data-write="add:FR77">Add FR77</button><button type="button" data-write="remove:FR77">Remove FR77</button><button type="button" data-write="remove:US12">Remove US12</button><button type="button" data-write="add:US12">Add US12</button></div>
+      <div id="mutation-state" class="demo-canvas"></div>
+      <p id="mutation-message" class="write-message" aria-live="polite"></p>
+      <div class="input-row"><label>Search kind<select id="mutation-kind"><option value="prefix">Starts with</option><option value="suffix">Ends with</option><option value="contains">Contains</option></select></label><label>Query<input id="mutation-query" value="US" maxlength="24" spellcheck="false"></label></div>
+      <div id="mutation-results" aria-live="polite"></div>
+      <details><summary>Show both sorted views of Added and Removed</summary><div class="detail-body" id="mutation-orders"></div></details>
+      <p class="caption">This small lab uses the actual threshold rule. It limits input lengths and pending changes to keep diagrams readable; normal C# inputs have no such UI limits.</p>
+    </div>
+    <h3>Four writes that cancel each other</h3>
+    <div class="table-scroll"><table><caption>Start with Base = [GB19, US12, US99], Added = [], Removed = []</caption><thead><tr><th>Operation</th><th>Added afterward</th><th>Removed afterward</th><th>Why</th></tr></thead><tbody><tr><td><code>Add("FR77")</code></td><td>[FR77]</td><td>[]</td><td>FR77 is new; leave Base alone.</td></tr><tr><td><code>Remove("FR77")</code></td><td>[]</td><td>[]</td><td>Cancel its pending addition. Base never had it.</td></tr><tr><td><code>Remove("US12")</code></td><td>[]</td><td>[US12]</td><td>Hide the string still present in Base.</td></tr><tr><td><code>Add("US12")</code></td><td>[]</td><td>[]</td><td>Cancel its pending removal. Base still has it.</td></tr></tbody></table></div>
+    <p><code>_items</code> is the writer’s set of all currently present strings. It makes <code>Add("US99")</code> a no-op when US99 is already present, and <code>Remove("ZZ00")</code> a no-op when ZZ00 is absent. Searches use State rather than reading this mutable set.</p>
+    <p><code>Delta.With</code> and <code>Delta.Without</code> make new prefix and suffix arrays. To insert FR77 into prefix order <code>[GB19, US55]</code>, binary search gives insertion position 0, then the code copies <code>[] + [FR77] + [GB19, US55]</code>. Removing GB19 finds its position and copies the pieces on either side. The old delta arrays stay unchanged.</p>
+    <h3>A prefix search with pending changes</h3>
+    <p>Suppose Added is <code>[US55]</code> and Removed is <code>[US12]</code>. <code>WithDelta</code> finds the "US" block separately in Base, Removed, and Added:</p>
+    <div class="equation"><span>Base: <b>US12, US99</b></span><span>−</span><span>Removed: <b>US12</b></span><span>+</span><span>Added: <b>US55</b></span><span>=</span><span class="result-pill">US55, US99</span></div>
+    <p>A query for <code>"GB"</code> has no matching additions or removals, so the code returns the Base window <code>[GB19]</code> directly, without copying its entries. The ends-with path does the same thing using the suffix-sorted views.</p>
+  </section>
+
+  <section id="merge" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">06</span><h2>Copy stretches. Insert US55. Skip US12.</h2></div>
+    <p>Both query-time overlays and full merges use <code>MergeSorted</code>. It builds a plan of positions first. It does not sort the whole Base again.</p>
+    <p>Use Base <code>[GB19, US12, US99]</code>, Removed <code>[US12]</code>, and Added <code>[US55]</code>. Binary search locates US12 at position 1. US55 would be inserted at position 2, before US99. Those positions refer to the <strong>original input array</strong>, before any removal changes a position.</p>
+    <div class="interactive" id="merge-demo">
+      <div class="demo-heading"><div><span class="eyebrow">FOLLOW THE COPY</span><h3>A new array from a plan of positions</h3></div><span class="demo-badge">MergeSorted · Merged.Copy</span></div>
+      <div id="merge-canvas" class="demo-canvas"></div>
+      <div class="step-copy" id="merge-copy" aria-live="polite"></div>
+      <div class="player" data-player="merge"><button type="button" data-action="reset" aria-label="Restart merge animation">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <p>In <code>Merged.Copy</code>, <code>from</code> tracks the next unread position in the original array, <code>to</code> tracks the next free output position, and <code>r</code> / <code>a</code> track removal / addition events. Copy all unchanged entries before the next event in one span operation. Then either write the added item or advance past the removed one. Finish by copying the remaining tail.</p>
+    <p>When an insertion and removal share a position, insertion goes first. For example, Base <code>[GB19, US12]</code>, Removed <code>[GB19]</code>, Added <code>[FR77]</code>: FR77’s insertion gap and GB19’s removal are both at position 0. Write FR77, skip GB19, then copy US12. Result: <code>[FR77, US12]</code>.</p>
+    <h3>Knowing the count does not require copying the result</h3>
+    <p><code>Merged&lt;T&gt;</code> is a result that initially holds the plan. Its <code>Count</code> is just <code>baseCount − removedCount + addedCount</code>. For the "US" query above, that is <code>2 − 1 + 1 = 2</code>. Reading <code>Count</code> does not build the combined result array.</p>
+    <p>Accessing an element or enumerating the result calls <code>ToArray()</code>, which copies <strong>the entire combined result</strong> and caches it. Asking for only the first item still triggers that copy. Concurrent readers may both create a copy; both contain the same values. <code>Filter</code>, in contrast, eagerly builds its list of hits.</p>
+    <h3>When does the whole Base get replaced?</h3>
+    <p><code>Publish</code> merges when <code>Added.Count + Removed.Count</code> reaches <code>max(256, _items.Count / 256)</code>, using integer division. The count is of <strong>pending items</strong>, not every write call. Add FR77 and immediately remove it: the pending count returns to zero.</p>
+    <div class="table-scroll"><table><caption>Threshold examples, using the current live item count after the write</caption><thead><tr><th>Live unique strings</th><th>Count / 256, rounded down</th><th>Merge at this many pending items</th></tr></thead><tbody><tr><td>3</td><td>0</td><td>256</td></tr><tr><td>100,000</td><td>390</td><td>390</td></tr><tr><td>1,000,000</td><td>3,906</td><td>3,906</td></tr></tbody></table></div>
+    <p>At the threshold, <code>Merge</code> constructs new prefix, suffix, and substring arrays. For prefix and suffix it uses their already-sorted deltas. For substrings it generates every removed and added starting-position entry with <code>SubstringsOf</code>. It sorts the new entries; removed entries need no sort because their located positions are sorted instead. After copying, the new State has empty Added and Removed collections.</p>
+    <p><strong>Why wait?</strong> Replacing a large Base copies a lot of entries. Batching changes spreads that cost across writes. Larger collections get a larger threshold to reduce how often their large arrays are copied. The merge runs synchronously in the triggering writer while it holds the write lock; it is not a background task.</p>
+  </section>
+
+  <section id="readers" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">07</span><h2>A reader can finish with the old view</h2></div>
+    <p>Imagine Reader A searches for <code>"US"</code> just before a writer removes <code>US12</code>. Reader A may keep <code>[US12, US99]</code>. A later search must see <code>[US99]</code>. Changing the old array in place would make Reader A’s result unstable.</p>
+    <div class="interactive" id="reader-demo">
+      <div class="demo-heading"><div><span class="eyebrow">STEP THROUGH THE HANDOFF</span><h3>One published State per search</h3></div><span class="demo-badge">Volatile.Read · Volatile.Write</span></div>
+      <div id="reader-canvas" class="demo-canvas"></div>
+      <div class="step-copy" id="reader-copy" aria-live="polite"></div>
+      <div class="player" data-player="reader"><button type="button" data-action="reset" aria-label="Restart reader animation">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <ol class="explain-steps"><li><strong>Reader A takes one reference.</strong> <code>Volatile.Read(ref _state)</code> gives it the old State. Its Base, Added, and Removed all come from that same State.</li><li><strong>The writer prepares a replacement.</strong> Under <code>_writeLock</code>, it changes _items and creates a State with US12 in Removed. The old State and arrays remain unchanged.</li><li><strong>Publish swaps the reference.</strong> <code>Volatile.Write</code> publishes the complete new State. No search sees a half-updated combination of arrays.</li><li><strong>Reader B starts after Remove returns.</strong> It sees the newly published State and filters out US12. Reader A can still finish against its old State.</li></ol>
+    <p>Writers are serialized by the lock. Searches do not take that lock and can continue using the old State while a writer builds a merge. An earlier result can outlive a later merge because its arrays are still referenced; the garbage collector can reclaim them when nobody holds them.</p>
+    <p>The guarantee is <strong>one consistent State per individual search</strong>. Three successive calls are three reads and may see different writes between them. Existing results are snapshots, not live lists that update after every write.</p>
+    <details><summary>What “unchanged arrays” means at the API boundary</summary><div class="detail-body"><p>The implementation never mutates published arrays and returns <code>IReadOnlyList&lt;string&gt;</code>. That is a read-only API contract, not a tamper-proof container: an unmodified Base window is an <code>ArraySegment&lt;string&gt;</code>, whose backing array can be recovered by a caller that deliberately downcasts. Treat returned results as read-only. The snapshot explanation assumes callers honor that contract.</p></div></details>
+  </section>
+
+  <section id="connect" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">08</span><h2>Follow a whole request, end to end</h2></div>
+    <p>Start with <code>[GB19, US12, US99]</code>. Call <code>Remove("US99")</code>, then <code>Add("FR99")</code>, then <code>Filter("9")</code>. Here is every stage working together:</p>
+    <div class="request-flow">
+      <article><span>1</span><div><h3>Write the pending changes</h3><p>Base stays [GB19, US12, US99]. Removed becomes [US99]. Added becomes [FR99]. Each write publishes a new State; two pending items are below the merge threshold.</p><code>Add / Remove → Delta.With → Publish</code></div></article>
+      <article><span>2</span><div><h3>Read a consistent view</h3><p>Filter takes one State reference. It will use that State’s Base and both deltas even if another writer publishes a newer State.</p><code>Volatile.Read(ref _state)</code></div></article>
+      <article><span>3</span><div><h3>Find the "9" block</h3><p>Two boundary searches return [3, 6): "9" from GB19 at 3, "9" from US99 at 3, and "99" from US99 at 2.</p><code>FindBlock&lt;Substring, SubstringOrder&gt;</code></div></article>
+      <article><span>4</span><div><h3>Find the removal’s first occurrence</h3><p>US99.IndexOf("9") gives 2. Search for (US99, 2) inside the block; its relative position is 2. The tie-breaker on the original item keeps different strings’ entries distinguishable.</p><code>IndexOf → BinarySearch → removedAt.Sort</code></div></article>
+      <article><span>5</span><div><h3>Keep one eligible hit per base string</h3><p>GB19 passes 1 &gt; Repeat 0. US99 at offset 3 fails 1 &gt; Repeat 1. US99 at offset 2 is explicitly removed. Base contributes [GB19].</p><code>fragment.Length &gt; repeat, except removedAt</code></div></article>
+      <article><span>6</span><div><h3>Include the pending addition</h3><p>FR99.Contains("9") is true. Append FR99 once. The result is [GB19, FR99]; no Base merge was needed.</p><code>Added.ByPrefix → Contains → hits</code></div></article>
+    </div>
+    <div class="note"><strong>Result order is not part of the interface contract.</strong> Prefix and suffix results follow their respective view order. Contains walks substring order, then appends matching additions in prefix order; its output is not guaranteed to be alphabetically sorted. If your caller needs a particular order, it must sort the result.</div>
+    <h3>What work did we save, and what did we pay for?</h3>
+    <p>With a million short strings, locating a prefix edge takes roughly twenty middle checks rather than inspecting a million items. We locate two edges. Comparing each entry still takes character work, and returning a million matching strings still means reading a million results.</p>
+    <div class="table-scroll"><table><caption>Costs in terms of the concrete work performed</caption><thead><tr><th>Operation</th><th>Work performed</th><th>Tradeoff</th></tr></thead><tbody><tr><td>Build</td><td>Sort two string views; create one entry per UTF-16 code unit, bucket and sort entries, calculate Repeat.</td><td>More startup work and memory for faster repeated searches. A 12-unit string contributes 12 substring structs.</td></tr><tr><td>Starts / ends</td><td>Two binary searches per relevant view (Base, Removed, Added), then locate delta changes if any.</td><td>An unchanged matching block can be returned without copying. A changed block is copied in full when enumerated or indexed.</td></tr><tr><td>Contains</td><td>Two boundary searches, scan the matching entry block, inspect pending additions/removals.</td><td>The block can contain more entries than unique result strings. The hit list is built immediately.</td></tr><tr><td>Ordinary write</td><td>Update the live HashSet, copy small delta arrays into their two sorted orders, publish.</td><td>Copying grows with pending changes; it is not a constant-cost append.</td></tr><tr><td>Threshold write</td><td>Also allocate and fill all three new Base arrays through Merge.</td><td>That write takes longer and temporarily keeps old and new arrays alive.</td></tr><tr><td>RepeatAt for long text</td><td>At every starting position, compare against every earlier starting position.</td><td>For a long repetitive string such as 10,000 A’s, common-prefix comparisons can be long too. Worst-case work per item grows cubically in its length.</td></tr></tbody></table></div>
+    <p>The code is especially suited to short identifiers. The bucket construction still handles all UTF-16 code units, but long names or highly repetitive text change the memory and build-time tradeoffs. The original strings are reused, yet the starting-position structs, arrays, live set, deltas, result lists, and temporary copies all consume memory. See the <a href="index.html#benchmarks">measured benchmark results</a> for context; the examples here illustrate behavior, not performance measurements.</p>
+  </section>
+
+  <section id="reference" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">09</span><h2>Now the source has landmarks</h2></div>
+    <p>Open <a href="https://github.com/bulatgrzegorz/search-algorithms/blob/main/src/SearchAlgorithms/SortedArrayIndex.cs">SortedArrayIndex.cs</a> alongside this page. The names below connect each piece of the implementation to an example you have just followed.</p>
+    <div class="table-scroll"><table class="reference-table"><caption>Every algorithm and helper in the file</caption><thead><tr><th>Source name</th><th>Remember it through this example</th><th>Walkthrough</th></tr></thead><tbody>
+      <tr><td>Constructor · _items</td><td>[US99, GB19, US99, US12] becomes three unique strings before building.</td><td><a href="#idea">01</a></td></tr>
+      <tr><td>Build · Snapshot</td><td>Construct [GB19, US12, US99], [US12, GB19, US99], and twelve starting-position entries.</td><td><a href="#build">02</a></td></tr>
+      <tr><td>SortedSubstrings</td><td>Count the three entries starting with '9', place them in [3, 6), then sort that bucket.</td><td><a href="#build">02</a></td></tr>
+      <tr><td>PrefixOrder</td><td>US12 sorts before US99; both match the prefix "US".</td><td><a href="#boundaries">03</a></td></tr>
+      <tr><td>SuffixOrder</td><td>US12 precedes GB19 because the last character 2 precedes 9.</td><td><a href="#build">02</a></td></tr>
+      <tr><td>Substring · SubstringOrder</td><td>(US99, 2) compares as "99"; equal suffix text is tied by original item.</td><td><a href="#contains">04</a></td></tr>
+      <tr><td>IOrder · Boundary · FindBlock</td><td>Find the gaps before US12 and after US99: [1, 3).</td><td><a href="#boundaries">03</a></td></tr>
+      <tr><td>GetByStartsWith · GetByEndsWith</td><td>Read State once; search its prefix or suffix view, including deltas.</td><td><a href="#changes">05</a></td></tr>
+      <tr><td>Filter · RepeatAt</td><td>Filter("9") skips US99’s later occurrence because length 1 ≤ Repeat 1.</td><td><a href="#contains">04</a></td></tr>
+      <tr><td>Add · Remove</td><td>Add FR77, remove FR77: the pending addition cancels itself.</td><td><a href="#changes">05</a></td></tr>
+      <tr><td>Delta.Contains / With / Without / Insert / Remove</td><td>Binary-search FR77’s place, copy new small arrays; never edit published arrays.</td><td><a href="#changes">05</a></td></tr>
+      <tr><td>WithDelta</td><td>[US12, US99] − [US12] + [US55] becomes [US55, US99].</td><td><a href="#changes">05</a></td></tr>
+      <tr><td>MergeSorted</td><td>Find US12 at 1 and US55’s insertion gap at 2 in the original array.</td><td><a href="#merge">06</a></td></tr>
+      <tr><td>Merged&lt;T&gt; · Count / indexer / GetEnumerator / ToArray / Copy</td><td>Count reads the plan; reading a value copies GB19, skips US12, inserts US55, copies US99.</td><td><a href="#merge">06</a></td></tr>
+      <tr><td>Publish · MergeThreshold</td><td>At a million live strings, 3,906 pending changes trigger a merge before publishing.</td><td><a href="#merge">06</a></td></tr>
+      <tr><td>Merge · SubstringsOf</td><td>Remove US12’s four entries and insert US55’s four entries, then clear the deltas.</td><td><a href="#merge">06</a></td></tr>
+      <tr><td>State · _writeLock · Volatile.Read / Write</td><td>Reader A can keep US12; Reader B starting after its removal sees only US99 for "US".</td><td><a href="#readers">07</a></td></tr>
+      <tr><td>DisposeAsync</td><td>Returns an already-completed ValueTask. There are no files, database handles, or worker tasks to close.</td><td>—</td></tr>
+    </tbody></table></div>
+    <details><summary>A small glossary, using the same strings</summary><div class="detail-body"><dl><dt>Array</dt><dd>An ordered sequence of slots: [GB19, US12, US99].</dd><dt>Offset</dt><dd>A starting position inside a string. In US99, offset 2 points to the first 9. These positions count UTF-16 code units; some visible Unicode characters occupy two.</dd><dt>Block / range</dt><dd>Neighboring array positions. [1, 3) includes positions 1 and 2.</dd><dt>Span</dt><dd>A view over existing contiguous memory, such as the characters "99" at the end of US99, without allocating that text as a new string.</dd><dt>ArraySegment</dt><dd>A window described by array, starting position, and count. The US block is a window starting at 1 with count 2.</dd><dt>Delta</dt><dd>The pending difference from Base: for example Added [FR77] and Removed [US12].</dd><dt>Snapshot</dt><dd>The three Base arrays built together. A State pairs one Snapshot with one Added delta and one Removed delta.</dd><dt>Materialize</dt><dd>Actually allocate and fill the planned result array, such as [US55, US99].</dd><dt>Common prefix</dt><dd>The shared beginning of two texts: "9" and "99" share one character.</dd></dl></div></details>
+    <div class="closing"><span class="brand-icon" aria-hidden="true">[✓]</span><p><strong>You can now trace a string through the whole class.</strong><br>Arrange the text → locate a matching block → handle duplicates and changes → return a stable result.</p><a href="#idea">Back to the first example ↑</a></div>
+  </section>
+  <footer><a href="index.html">← Back to all algorithms</a><br>Built from the repository’s <code>SortedArrayIndex.cs</code> and <code>ISearchAlgorithm.cs</code>. Examples are intentionally small. Interactive demonstrations run entirely in your browser; no data is sent anywhere. <button type="button" id="print-page">Print / save as PDF</button></footer>
+</main>
+</div>
+</body>
+</html>

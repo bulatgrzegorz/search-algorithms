@@ -44,7 +44,7 @@ internal static class FootprintRun
     private static void Measure(string name, int count)
     {
         var baseline = GC.GetTotalMemory(forceFullCollection: true);
-        string[]? items = Dataset.Load(count);
+        Entry[]? items = Dataset.Load(count);
         var (prefixes, suffixes, fragments) = Dataset.Queries(items, count: 1);
         var itemCount = items.Length;
 
@@ -54,7 +54,7 @@ internal static class FootprintRun
         // Nulled, not just unused: unoptimized (tier 0) code keeps locals alive. What the index keeps of the items still counts.
         items = null;
 
-        string First(Func<string, IReadOnlyList<string>> search, string query)
+        string First(Func<string, IReadOnlyList<Entry>> search, string query)
         {
             clock.Restart();
             _ = search(query).Count;

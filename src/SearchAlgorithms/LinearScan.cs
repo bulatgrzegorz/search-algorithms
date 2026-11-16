@@ -1,28 +1,28 @@
 namespace SearchAlgorithms;
 
 // Baseline: no index, checks every item on every query. Searches share a read lock, writes take it exclusively.
-public sealed class LinearScan(string[] items) : ISearchAlgorithm
+public sealed class LinearScan(Entry[] items) : ISearchAlgorithm
 {
-    readonly HashSet<string> _items = new(items, StringComparer.Ordinal);
+    readonly HashSet<Entry> _items = new(items);
     readonly ReaderWriterLockSlim _lock = new();
 
-    public IReadOnlyList<string> GetByStartsWith(string prefix) =>
+    public IReadOnlyList<Entry> GetByStartsWith(string prefix) =>
         FindAll(x => x.StartsWith(prefix, StringComparison.Ordinal));
 
-    public IReadOnlyList<string> GetByEndsWith(string suffix) =>
+    public IReadOnlyList<Entry> GetByEndsWith(string suffix) =>
         FindAll(x => x.EndsWith(suffix, StringComparison.Ordinal));
 
-    public IReadOnlyList<string> Filter(string fragment) =>
+    public IReadOnlyList<Entry> Filter(string fragment) =>
         FindAll(x => x.Contains(fragment, StringComparison.Ordinal));
 
-    public void Add(string item)
+    public void Add(Entry item)
     {
         _lock.EnterWriteLock();
         try { _items.Add(item); }
         finally { _lock.ExitWriteLock(); }
     }
 
-    public void Remove(string item)
+    public void Remove(Entry item)
     {
         _lock.EnterWriteLock();
         try { _items.Remove(item); }
@@ -35,10 +35,10 @@ public sealed class LinearScan(string[] items) : ISearchAlgorithm
         return ValueTask.CompletedTask;
     }
 
-    List<string> FindAll(Func<string, bool> match)
+    List<Entry> FindAll(Func<string, bool> match)
     {
         _lock.EnterReadLock();
-        try { return _items.Where(match).ToList(); }
+        try { return _items.Where(x => match(x.Key)).ToList(); }
         finally { _lock.ExitReadLock(); }
     }
 }

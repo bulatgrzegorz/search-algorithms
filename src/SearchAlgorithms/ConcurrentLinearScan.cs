@@ -4,26 +4,26 @@ namespace SearchAlgorithms;
 
 // LinearScan without the read lock: ConcurrentDictionary may be enumerated while it's written,
 // so searches never block, but a search running during writes may or may not see them.
-public sealed class ConcurrentLinearScan(string[] items) : ISearchAlgorithm
+public sealed class ConcurrentLinearScan(Entry[] items) : ISearchAlgorithm
 {
-    readonly ConcurrentDictionary<string, byte> _items = new(items.Select(x => KeyValuePair.Create(x, (byte)0)), StringComparer.Ordinal);
+    readonly ConcurrentDictionary<Entry, byte> _items = new(items.Select(x => KeyValuePair.Create(x, (byte)0)));
 
-    public IReadOnlyList<string> GetByStartsWith(string prefix) =>
+    public IReadOnlyList<Entry> GetByStartsWith(string prefix) =>
         FindAll(x => x.StartsWith(prefix, StringComparison.Ordinal));
 
-    public IReadOnlyList<string> GetByEndsWith(string suffix) =>
+    public IReadOnlyList<Entry> GetByEndsWith(string suffix) =>
         FindAll(x => x.EndsWith(suffix, StringComparison.Ordinal));
 
-    public IReadOnlyList<string> Filter(string fragment) =>
+    public IReadOnlyList<Entry> Filter(string fragment) =>
         FindAll(x => x.Contains(fragment, StringComparison.Ordinal));
 
-    public void Add(string item) => _items.TryAdd(item, 0);
+    public void Add(Entry item) => _items.TryAdd(item, 0);
 
-    public void Remove(string item) => _items.TryRemove(item, out _);
+    public void Remove(Entry item) => _items.TryRemove(item, out _);
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     // Enumerating the dictionary is lock-free; .Keys would take every lock and copy.
-    List<string> FindAll(Func<string, bool> match) =>
-        _items.Where(x => match(x.Key)).Select(x => x.Key).ToList();
+    List<Entry> FindAll(Func<string, bool> match) =>
+        _items.Where(x => match(x.Key.Key)).Select(x => x.Key).ToList();
 }

@@ -53,7 +53,7 @@ public class SearchBenchmarks
     [Benchmark] public long Filter() => Run(_fragments, static (a, q) => a.Filter(q));
 
     // Returns total hits so the JIT can't drop the work.
-    private long Run(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search)
+    private long Run(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<Entry>> search)
     {
         var start = _next;
         _next = (start + Requests) % queries.Length;
@@ -68,7 +68,7 @@ public class SearchBenchmarks
 // stays constant. Runs until stopped and returns the rate it achieved.
 internal static class Writer
 {
-    public static double Run(ISearchAlgorithm algorithm, string[] present, string[] absent, int writesPerSecond, CancellationToken stop)
+    public static double Run(ISearchAlgorithm algorithm, Entry[] present, Entry[] absent, int writesPerSecond, CancellationToken stop)
     {
         var clock = Stopwatch.StartNew();
         long done = 0;
@@ -116,15 +116,19 @@ public class TypeaheadBenchmarks
     [Benchmark] public long StartsWith() => Type(_prefixes, static (a, q) => a.GetByStartsWith(q));
     [Benchmark] public long Filter() => Type(_fragments, static (a, q) => a.Filter(q));
 
-    // Returns the shown hits' total length so the JIT can't drop reading them.
-    private long Type(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<string>> search)
+    // Returns the shown hits' total length plus Ids so the JIT can't drop reading them.
+    private long Type(string[] queries, Func<ISearchAlgorithm, string, IReadOnlyList<Entry>> search)
     {
         var query = queries[_next++ % queries.Length];
         long shown = 0;
         for (var typed = 1; typed <= query.Length; typed++)
         {
             var hits = search(_algorithm, query[..typed]);
-            for (var i = 0; i < Math.Min(TopN, hits.Count); i++) shown += hits[i].Length;
+            for (var i = 0; i < Math.Min(TopN, hits.Count); i++)
+            {
+                var hit = hits[i];
+                shown += hit.Key.Length + hit.Id;
+            }
         }
         return shown;
     }
@@ -142,7 +146,7 @@ public class MutationBenchmarks
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
     private ISearchAlgorithm _algorithm = null!;
-    private string[] _removable = [], _fresh = [];
+    private Entry[] _removable = [], _fresh = [];
     private int _i;
 
     [GlobalSetup]
@@ -175,7 +179,7 @@ public class BuildBenchmarks
     [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
     public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
 
-    private string[] _items = [];
+    private Entry[] _items = [];
     private ISearchAlgorithm? _built;
 
     [GlobalSetup] public void Setup() => _items = Dataset.Load((int)Size);

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using Lucene.Net.Analysis;
 using Lucene.Net.Analysis.NGram;
@@ -23,6 +24,7 @@ public class LuceneIndex : ISearchAlgorithm
     private static readonly FieldType NGramFieldType = new(StringField.TYPE_NOT_STORED) { IsTokenized = true };
     private readonly string _path;
     private readonly NRTCachingDirectory _directory;
+    // private readonly RAMDirectory _ramDirectory;
     private readonly IndexWriter _indexWriter;
     // Lucene reuses each field's tokenizer per thread, instead of a new one (~6 KB of buffers) per field per document.
     private readonly Analyzer _analyzer = Analyzer.NewAnonymous((field, reader) => new TokenStreamComponents(field == "value-ngram"
@@ -33,18 +35,18 @@ public class LuceneIndex : ISearchAlgorithm
     private readonly Lock _refreshLock = new();
     private long _writes;  // bumped after every Add/Remove
     private long _visible; // writes the current searcher is guaranteed to include
-    // Per segment: its ids decoded once, indexed by doc number. Segments never change (deletes only hide docs),
+    // Per segment: its entries decoded once from their ids, indexed by doc number. Segments never change (deletes only hide docs),
     // so a table stays valid; keyed by the segment's core, it is dropped once Lucene no longer has that segment open.
-    private readonly ConditionalWeakTable<object, string[]> _idsBySegment = new();
+    private readonly ConditionalWeakTable<object, Entry[]> _idsBySegment = new();
 
-    public LuceneIndex(string[] items)
+    public LuceneIndex(Entry[] items)
     {
         _path = Guid.NewGuid().ToString();
         // MMap: Lucene.Net picks it only on Windows/Linux; elsewhere NIOFSDirectory's buffered file reads were 44-70% of a search.
         // NRTCaching: the tiny segments each refresh after Add/Remove flushes stay in RAM (up to 5 MB each, 60 MB total);
         // as files, opening/deleting/stat-ing them was most of a refresh.
         _directory = new NRTCachingDirectory(new MMapDirectory(new DirectoryInfo(_path)), maxMergeSizeMB: 5, maxCachedMB: 60);
-
+        // _ramDirectory = new RAMDirectory();
         // 256 MB: fastest build measured at 1M items (16 MB flushes so often that merging dominates, 2048 MB was slower too).
         // No compound file: packing each refresh's tiny segment into one meant writing, copying and deleting extra files.
         var indexConfig = new IndexWriterConfig(AppLuceneVersion, _analyzer) { RAMBufferSizeMB = 256, UseCompoundFile = false };
@@ -52,6 +54,7 @@ public class LuceneIndex : ISearchAlgorithm
         // fits in RAMBufferSizeMB (100k items) otherwise flushed every thread's buffer one by one inside ForceMerge.
         indexConfig.MaxBufferedDocs = Math.Max(2, items.Length / Environment.ProcessorCount);
         _indexWriter = new IndexWriter(_directory, indexConfig);
+        // _indexWriter = new IndexWriter(_ramDirectory, indexConfig);
 
         // Not one AddDocuments call: that's an atomic block, which can't flush, so the whole index sat in one in-memory segment.
         // Each core fills its own segments; then one merge, since every extra segment costs every query a term lookup.
@@ -62,33 +65,33 @@ public class LuceneIndex : ISearchAlgorithm
         _searcherManager = new SearcherManager(_indexWriter, applyAllDeletes: true, searcherFactory: null);
     }
 
-    public IReadOnlyList<string> GetByStartsWith(string prefix) =>
+    public IReadOnlyList<Entry> GetByStartsWith(string prefix) =>
         SearchEdge("value-prefix", prefix, x => x.StartsWith(prefix, StringComparison.Ordinal));
 
-    public IReadOnlyList<string> GetByEndsWith(string suffix) =>
+    public IReadOnlyList<Entry> GetByEndsWith(string suffix) =>
         SearchEdge("value-suffix", Reverse(suffix), x => x.EndsWith(suffix, StringComparison.Ordinal));
 
     // "" is a prefix of everything but no indexed term, so it matches all docs like the old PrefixQuery did.
     // shortcut: edges over MaxEdgeGram chars look up only their first MaxEdgeGram and verify the rest; raise MaxEdgeGram if long ones are common.
-    private List<string> SearchEdge(string field, string edge, Func<string, bool> matches)
+    private List<Entry> SearchEdge(string field, string edge, Func<string, bool> matches)
     {
         if (edge.Length == 0) return Search(term: null);
         var gram = edge.Length <= MaxEdgeGram ? edge : edge[..MaxEdgeGram];
         var ids = Search(new Term(field, gram));
-        return gram.Length == edge.Length ? ids : ids.Where(matches).ToList();
+        return gram.Length == edge.Length ? ids : ids.Where(x => matches(x.Key)).ToList();
     }
 
-    public IReadOnlyList<string> Filter(string fragment)
+    public IReadOnlyList<Entry> Filter(string fragment)
     {
         // Fragments up to MaxGram chars are indexed as-is, so one exact term lookup finds them.
         // shortcut: longer fragments look up only their first MaxGram chars and verify the rest; intersect more grams if long filters matter.
         var gram = fragment.Length <= MaxGram ? fragment : fragment[..MaxGram];
         var ids = Search(new Term("value-ngram", gram));
-        return gram.Length == fragment.Length ? ids : ids.Where(x => x.Contains(fragment, StringComparison.Ordinal)).ToList();
+        return gram.Length == fragment.Length ? ids : ids.Where(x => x.Key.Contains(fragment, StringComparison.Ordinal)).ToList();
     }
 
     // Docs holding the term, or every doc for null.
-    private List<string> Search(Term? term)
+    private List<Entry> Search(Term? term)
     {
         RefreshIfStale();
         var indexSearcher = _searcherManager.Acquire();
@@ -111,15 +114,15 @@ public class LuceneIndex : ISearchAlgorithm
 
     // Built by the first search that reaches a segment: a few ms for a large freshly merged one, then free.
     // Read from the "id" terms' postings, so a hit costs an array index instead of a doc-values read from the file.
-    private string[] IdsByDoc(AtomicReader segment) => _idsBySegment.GetValue(segment.CoreCacheKey, _ =>
+    private Entry[] IdsByDoc(AtomicReader segment) => _idsBySegment.GetValue(segment.CoreCacheKey, _ =>
     {
-        var ids = new string[segment.MaxDoc];
+        var ids = new Entry[segment.MaxDoc];
         var terms = segment.GetTerms("id").GetEnumerator();
 
         DocsEnum? docs = null;
         while (terms.MoveNext())
         {
-            var id = terms.Term.Utf8ToString();
+            var id = DocumentExtensions.ParseId(terms.Term.Utf8ToString());
             // liveDocs null: deleted docs too, as later readers of this segment may hide a different set.
             docs = terms.Docs(null, docs, DocsFlags.NONE);
             for (var doc = docs.NextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = docs.NextDoc()) 
@@ -142,14 +145,14 @@ public class LuceneIndex : ISearchAlgorithm
         }
     }
 
-    public void Add(string item)
+    public void Add(Entry item)
     {
         _indexWriter.UpdateDocument(item.IdTerm(), CreateDocument(item));
 
         Interlocked.Increment(ref _writes);
     }
 
-    public void Remove(string item)
+    public void Remove(Entry item)
     {
         _indexWriter.DeleteDocuments(item.IdTerm());
 
@@ -162,17 +165,19 @@ public class LuceneIndex : ISearchAlgorithm
         _indexWriter.Dispose();
         _analyzer.Dispose();
         _directory.Dispose();
+        // _ramDirectory.Dispose();
 
         Directory.Delete(_path, true);
 
         return ValueTask.CompletedTask;
     }
 
-    private static Document CreateDocument(string x)
+    private static Document CreateDocument(Entry entry)
     {
+        var x = entry.Key;
         Document document =
         [
-            new StringField("id", x, Field.Store.NO), // indexed: Add/Remove find the doc by this term, IdsByDoc reads ids back from it
+            new StringField("id", entry.IdText(), Field.Store.NO), // indexed: Add/Remove find the doc by this term, IdsByDoc reads entries back from it
             // Every prefix (of the reverse: every suffix) is its own term, so StartsWith/EndsWith are one term lookup
             // instead of a PrefixQuery visiting each matching item's term.
             new Field("value-prefix", x, NGramFieldType),
@@ -192,10 +197,10 @@ public class LuceneIndex : ISearchAlgorithm
 }
 
 // Collects every hit's id: no scoring, no top-N queue, no stored-field loading, nothing decoded or allocated per hit.
-internal sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc, int capacity) : ICollector
+internal sealed class IdCollector(Func<AtomicReader, Entry[]> idsByDoc, int capacity) : ICollector
 {
-    public readonly List<string> Ids = new(capacity);
-    private string[] _ids = [];
+    public readonly List<Entry> Ids = new(capacity);
+    private Entry[] _ids = [];
 
     public void SetScorer(Scorer scorer) { }
     // Called once per segment; doc numbers in Collect are relative to that segment.
@@ -204,10 +209,16 @@ internal sealed class IdCollector(Func<AtomicReader, string[]> idsByDoc, int cap
     public bool AcceptsDocsOutOfOrder => true;
 }
 
+// An entry's id term is "Id:Key": both, since an entry is both. Id has no ':', so the first one splits them.
 internal static class DocumentExtensions
 {
-    public static Term IdTerm(this string id)
+    public static string IdText(this Entry entry) => string.Create(CultureInfo.InvariantCulture, $"{entry.Id}:{entry.Key}");
+
+    public static Term IdTerm(this Entry entry) => new("id", entry.IdText());
+
+    public static Entry ParseId(string text)
     {
-        return new Term("id", id);
+        var colon = text.IndexOf(':');
+        return new Entry(text[(colon + 1)..], int.Parse(text.AsSpan(0, colon), CultureInfo.InvariantCulture));
     }
 }
