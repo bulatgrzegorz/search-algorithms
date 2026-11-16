@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Seven ways to answer starts-with, ends-with and contains over 100,000 real ISINs, stepped through with small examples and measured with BenchmarkDotNet.">
+  <title>Search, illustrated</title>
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/bench-data.js" defer></script>
+  <script src="assets/overview.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="topbar">
+  <a class="brand" href="index.html"><span class="brand-icon" aria-hidden="true">[↗]</span> Search, illustrated</a>
+  <nav class="top-links"><a href="#benchmarks">Benchmarks</a><a href="sorted-array.html">Sorted array walkthrough</a><a class="source-link" href="https://github.com/bulatgrzegorz/search-algorithms">GitHub ↗</a></nav>
+</header>
+<div class="layout">
+<aside class="sidebar" aria-label="On this page">
+  <p class="eyebrow">THE ALGORITHMS</p>
+  <nav>
+    <a href="#testing"><span>00</span> What we test</a>
+    <a href="#linear"><span>01</span> Linear scan</a>
+    <a href="#concurrent"><span>02</span> Concurrent scan</a>
+    <a href="#naive-rocks"><span>03</span> Naive RocksDB</a>
+    <a href="#naive-lucene"><span>04</span> Naive Lucene</a>
+    <a href="#fix-lucene"><span>05</span> Fixing Lucene</a>
+    <a href="#fix-rocks"><span>06</span> Fixing RocksDB</a>
+    <a href="#benchmarks"><span>07</span> The numbers</a>
+    <a href="#sorted"><span>08</span> Sorted arrays</a>
+  </nav>
+  <div class="sidebar-note">Every example uses the same short keys: <strong>FR77 · GB19 · US12 · US55 · US99 · ZA88</strong>.<br>Read down, then press <em>Next</em> in each player.</div>
+</aside>
+<main id="main">
+  <section class="hero" aria-labelledby="title">
+    <p class="eyebrow">A VISUAL TOUR OF <code>search-algorithms</code></p>
+    <h1 id="title">Seven ways to find <br>a <em>string.</em></h1>
+    <p class="lead">Three questions (starts with, ends with, contains) asked of 100,000 real ISINs while the data keeps changing. See how each approach answers them, how much work it took to make two general-purpose engines fast, and why a few sorted arrays end up winning.</p>
+    <a class="primary-link" href="#testing">Start with the contract <span aria-hidden="true">↓</span></a>
+    <div class="hero-figure">
+      <div class="query-tag">ISearchAlgorithm</div>
+<pre class="hero-code"><span class="k">IReadOnlyList</span>&lt;Entry&gt; GetByStartsWith(string prefix);   <span class="c">// "US"   → US0378331005, …</span>
+<span class="k">IReadOnlyList</span>&lt;Entry&gt; GetByEndsWith(string suffix);     <span class="c">// "1005" → US0378331005, …</span>
+<span class="k">IReadOnlyList</span>&lt;Entry&gt; Filter(string fragment);          <span class="c">// "7833" → US0378331005, …</span>
+<span class="k">void</span> Add(Entry item);
+<span class="k">void</span> Remove(Entry item);</pre>
+      <p>One interface. Seven implementations. Same data, same queries, same machine.</p>
+    </div>
+  </section>
+
+  <noscript><div class="note">JavaScript is off. The text and static examples are all here; enable JavaScript for the step players and charts.</div></noscript>
+
+  <section id="testing" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">00</span><h2>What we are testing</h2></div>
+    <p>Every algorithm implements <code>ISearchAlgorithm</code>. An <code>Entry(Key, Id)</code> is what a query matches (<code>Key</code>) and what the caller gets back to find its entity (<code>Id</code>). The rules are the same for all seven:</p>
+    <ul class="rules">
+      <li><strong>Ordinal and case-sensitive.</strong> <code>"us"</code> does not start with <code>"US"</code>. No culture rules, no normalization.</li>
+      <li><strong>Result order is free.</strong> An index may return hits in whatever order is cheapest.</li>
+      <li><strong>Everything is concurrent.</strong> Searches run while <code>Add</code> and <code>Remove</code> change the data, and a search that starts after a write returned must see it. Each implementation owns its synchronization.</li>
+      <li><strong>Same answers.</strong> <code>dotnet test</code> checks every implementation against a plain LINQ scan, also after adds and removes.</li>
+    </ul>
+    <div class="view-grid">
+      <article><span class="view-label">THE DATA</span><h3>Real ISINs</h3><p>~9.4 million unique 12-character securities identifiers from GLEIF's ISIN→LEI mapping, such as <code>US0378331005</code>.</p><p class="caption">Medium = a seeded random sample of <strong>100,000</strong>. Small (10k) is a subset of it.</p></article>
+      <article><span class="view-label">THE QUERIES</span><h3>3–6 character cuts</h3><p>Prefixes, suffixes and middle fragments cut from random items with a fixed seed, so every algorithm answers exactly the same queries.</p><p class="caption">Short queries are the hard ones: they match many items.</p></article>
+      <article><span class="view-label">THE HARNESS</span><h3>BenchmarkDotNet</h3><p>Mean time per operation and bytes allocated. A separate process per index measures retained memory.</p><p class="caption" id="machine-note">Apple M2, 8 cores.</p></article>
+    </div>
+    <div class="table-scroll"><table><caption>The scenarios behind the charts in chapter 07</caption><thead><tr><th>Scenario</th><th>What one measured operation is</th><th>Why it matters</th></tr></thead><tbody>
+      <tr><td>Single query</td><td>One <code>StartsWith</code>, <code>EndsWith</code> or <code>Filter</code> call, nothing else running.</td><td>Pure search cost.</td></tr>
+      <tr><td>Under writes</td><td>The same single query while a background writer performs 1,000 updates per second (each one <code>Remove</code> + <code>Add</code>).</td><td>Live data: indexes that must refresh, merge or lock pay here.</td></tr>
+      <tr><td>Typeahead</td><td>One search per keystroke of a 3–6 character query, reading only the first 10 hits.</td><td>A search box. Indexes that copy every hit up front pay for hits nobody reads.</td></tr>
+      <tr><td>Build</td><td>The constructor: index 100,000 entries from scratch.</td><td>Startup and rebuild cost.</td></tr>
+      <tr><td>Add / Remove</td><td>One write, single-threaded.</td><td>The cost of keeping the index live.</td></tr>
+      <tr><td>Memory</td><td>Build in a fresh process, then measure retained heap, process RSS and files on disk.</td><td>What the index costs to keep around.</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="linear" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">01</span><h2>Linear scan: check everything, every time</h2></div>
+    <p>The baseline has no index at all. <code>LinearScan</code> keeps a <code>HashSet&lt;Entry&gt;</code> and, for each query, asks every item the question directly: <code>Key.StartsWith(prefix)</code>, <code>Key.EndsWith(suffix)</code> or <code>Key.Contains(fragment)</code>. It is short, obviously correct, and the reference the tests compare everyone else against.</p>
+<pre class="code-block"><span class="k">private</span> List&lt;Entry&gt; FindAll(Func&lt;string, bool&gt; match)
+{
+    _lock.EnterReadLock();
+    <span class="k">try</span> { <span class="k">return</span> _items.Where(x =&gt; match(x.Key)).ToList(); }
+    <span class="k">finally</span> { _lock.ExitReadLock(); }
+}</pre>
+    <div class="interactive" id="linear-demo">
+      <div class="demo-heading"><div><span class="eyebrow">WATCH THE SCAN</span><h3>Six items, six checks, whatever the question</h3></div><span class="demo-badge">LinearScan.FindAll</span></div>
+      <div class="input-row"><label>Question<select id="linear-kind"><option value="prefix">Starts with "US"</option><option value="suffix">Ends with "9"</option><option value="contains">Contains "7"</option></select></label></div>
+      <div class="demo-canvas" id="linear-canvas"></div>
+      <div class="step-copy" id="linear-copy" aria-live="polite"></div>
+      <div class="player" data-player="linear"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <p>The cost is the number of items times the cost of one string check, for every query. At 100,000 ISINs that is 100,000 checks even when the answer is empty. Writes are cheap (one hash-set operation) but must take the lock exclusively, so a write waits for every running search to finish, and new searches wait behind the write.</p>
+  </section>
+
+  <section id="concurrent" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">02</span><h2>Concurrent scan: drop the lock, keep the scan</h2></div>
+    <p><code>ConcurrentLinearScan</code> asks the same question of every item, but stores them in a <code>ConcurrentDictionary&lt;Entry, byte&gt;</code>. Enumerating it is lock-free, so searches never block and writers never wait for readers. The price is weaker consistency: a search running during writes may or may not see them.</p>
+    <div class="interactive" id="concurrent-demo">
+      <div class="demo-heading"><div><span class="eyebrow">ONE WRITE, TWO SEARCHES</span><h3>Who waits for whom?</h3></div><span class="demo-badge">ReaderWriterLockSlim vs ConcurrentDictionary</span></div>
+      <div class="demo-canvas" id="concurrent-canvas"></div>
+      <div class="step-copy" id="concurrent-copy" aria-live="polite"></div>
+      <div class="player" data-player="concurrent"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <div class="note"><strong>Removing the lock did not make searches faster.</strong> The scan is still a scan, and walking a <code>ConcurrentDictionary</code> visits one heap-allocated node per item through its buckets, where a <code>HashSet</code> walks one dense array. In the measurements the concurrent version is the slower of the two for single queries. Locking was never the bottleneck; touching every item was.</div>
+  </section>
+
+  <section id="naive-rocks" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">03</span><h2>Naive RocksDB: sorted keys, used for one question</h2></div>
+    <p>RocksDB is an embedded key-value store that keeps keys <strong>sorted by their bytes</strong>. Writes land in an in-memory table and are later written out as sorted files; an iterator merges them into one ordered view. <code>NaiveRocksDbIndex</code> is the textbook setup: default options, one <code>Put</code> per entry, and one key per entry:</p>
+    <div class="key-anatomy" aria-label="Key layout: the Key's UTF-8 bytes, a 0xFF separator byte, then the Id as 4 big-endian bytes"><span class="k-part">US99</span><span class="k-sep">0xFF</span><span class="k-id">00 00 00 05</span><small>Key as UTF-8 · separator (never in UTF-8) · Id, 4 bytes · value: empty</small></div>
+    <p>Because the keys are sorted, <code>StartsWith</code> is easy: <em>seek</em> to the first key ≥ the prefix and read forward until a key stops matching. <code>EndsWith</code> and <code>Filter</code> get no help from that order, so the naive version reads <strong>every key</strong> and checks it in C#.</p>
+    <div class="interactive" id="rocks-demo">
+      <div class="demo-heading"><div><span class="eyebrow">DRIVE THE ITERATOR</span><h3>Seek once, or read everything?</h3></div><span class="demo-badge">Iterator.Seek · Next</span></div>
+      <div class="input-row"><label>Question<select id="rocks-kind"><option value="prefix">Starts with "US"</option><option value="suffix">Ends with "9"</option><option value="contains">Contains "S9"</option></select></label></div>
+      <div class="legend"><span><i class="legend-probe"></i>iterator position</span><span><i class="legend-hit"></i>hit</span><span>Dimmed = not read</span></div>
+      <div class="demo-canvas" id="rocks-canvas"></div>
+      <div class="step-copy" id="rocks-copy" aria-live="polite"></div>
+      <div class="player" data-player="rocks"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <p>Every key read crosses from .NET into the native library, copies the key into a new <code>byte[]</code> and decodes a new string. A full scan pays that 100,000 times. The defaults cost more elsewhere too: a write-ahead log for an index that is rebuilt anyway, and a build that puts entries one at a time and never compacts.</p>
+  </section>
+
+  <section id="naive-lucene" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">04</span><h2>Naive Lucene: a search engine, used literally</h2></div>
+    <p>Lucene is an <strong>inverted index</strong>: a sorted dictionary of terms, each pointing to the list of documents that contain it (its <em>postings</em>). <code>NaiveLuceneIndex</code> indexes each entry as one document whose whole Key is a single term, and asks wildcard questions: <code>US*</code>, <code>*9</code>, <code>*S9*</code>.</p>
+    <p>A <code>WildcardQuery</code> becomes an automaton that is walked against the term dictionary. A pattern with a fixed start can skip straight to its region of terms. A pattern starting with <code>*</code> cannot: it must test every term. And each search here does more than walk terms:</p>
+    <div class="interactive" id="lucene-demo">
+      <div class="demo-heading"><div><span class="eyebrow">FOLLOW ONE SEARCH</span><h3><code>Filter("S9")</code> → <code>WildcardQuery("*S9*")</code></h3></div><span class="demo-badge">DirectoryReader.Open · Search · Doc</span></div>
+      <div class="demo-canvas" id="lucene-canvas"></div>
+      <div class="step-copy" id="lucene-copy" aria-live="polite"></div>
+      <div class="player" data-player="lucene"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <p>Each step is reasonable for full-text search, where you want the ten best-scoring documents. Here every hit is wanted, nothing needs a score, and the reader is reopened per query. So the textbook version pays for ranking, for loading stored documents, and for refreshing the index on every call.</p>
+  </section>
+
+  <section id="fix-lucene" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">05</span><h2>What it took to make Lucene fast</h2></div>
+    <p>Lucene can be fast here, but not by tuning one setting. Almost every default the naive version leans on had to be replaced, each change found with a profiler and kept only if a benchmark agreed.</p>
+    <div class="stat-row">
+      <div class="stat"><b>9</b><span>optimization commits, each one profiled and measured</span></div>
+      <div class="stat"><b>74 → 226</b><span>lines of C#, including a custom hit collector</span></div>
+      <div class="stat"><b>3</b><span>n-gram fields per document instead of one term</span></div>
+      <div class="stat"><b id="lucene-gain">—</b><span>Filter, naive → tuned (Medium, single query)</span></div>
+    </div>
+    <div class="interactive" id="ngram-demo">
+      <div class="demo-heading"><div><span class="eyebrow">THE CORE IDEA</span><h3>Index every answer as its own term</h3></div><span class="demo-badge">EdgeNGramTokenizer · NGramTokenizer</span></div>
+      <div class="demo-canvas" id="ngram-canvas"></div>
+      <div class="step-copy" id="ngram-copy" aria-live="polite"></div>
+      <div class="player" data-player="ngram"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <div class="table-scroll"><table class="fix-table"><caption>Every layer changed: naive → tuned</caption><thead><tr><th>Layer</th><th>NaiveLuceneIndex</th><th>LuceneIndex</th></tr></thead><tbody>
+      <tr><td>Query</td><td><code>WildcardQuery</code>, leading <code>*</code> walks every term</td><td>One <code>TermQuery</code> on a precomputed prefix, suffix or n-gram term; longer queries look up 6 chars and verify the rest</td></tr>
+      <tr><td>Reader</td><td>New near-real-time reader per search</td><td><code>SearcherManager</code>, refreshed only when a write happened since the last refresh</td></tr>
+      <tr><td>Collecting hits</td><td>A ranked top-N queue as large as the index (<code>Search(query, int.MaxValue)</code>)</td><td>A custom <code>ICollector</code>: no scoring, no queue, result list sized from the term's doc count</td></tr>
+      <tr><td>Reading hits</td><td>Load each hit's stored document</td><td>A per-segment <code>Entry[]</code> table, indexed by doc number, built once from the id terms</td></tr>
+      <tr><td>Storage</td><td><code>FSDirectory</code> (buffered file reads on macOS), compound files</td><td><code>MMapDirectory</code> behind <code>NRTCachingDirectory</code>, no compound files</td></tr>
+      <tr><td>Build</td><td>One thread, many segments</td><td>All cores, 256 MB buffer, per-thread flushes, <code>ForceMerge(1)</code></td></tr>
+    </tbody></table></div>
+    <details><summary>The commit trail, with what each step measured</summary><div class="detail-body"><ol class="trail">
+      <li><b>Collect ids, reuse the searcher.</b> Collector reads ids without scoring or stored fields; <code>SearcherManager</code> shares one searcher and reopens only after unseen writes.</li>
+      <li><b>Decode each id into one string</b>, not a <code>CharsRef</code> plus <code>char[]</code>: 128 → 48 B per hit.</li>
+      <li><b>Return existing string instances</b> instead of decoded copies.</li>
+      <li><b>StartsWith / EndsWith as one term lookup</b> via edge n-grams; reuse tokenizers per thread. StartsWith 2,745 → 1,570 μs, EndsWith 17 → 9 μs.</li>
+      <li><b>Per-segment id table</b> indexed by doc number: a hit costs an array index.</li>
+      <li><b>Parallel build, one segment, edges up to 6 chars.</b> Each extra segment cost every query a term lookup (EndsWith was 10× slower at 13–19 segments). 1M build 51.6 → 23.2 s.</li>
+      <li><b>MMap behind NRT caching, no compound files.</b> Buffered reads were 44–70% of every search. Under 1,000 writes/s: EndsWith 4,101 → 92 μs.</li>
+      <li><b>Size result lists up front</b> from the term's doc count: growing them was 56–63% of a large search.</li>
+      <li><b>Per-thread flushes during build</b>: Medium build ~3.1 → 2.6 s.</li>
+    </ol><p class="caption">From the repository's commit messages; the numbers were measured at the time of each commit, on earlier versions of the benchmark.</p></div></details>
+    <div class="note"><strong>What it still costs.</strong> The n-gram fields multiply the index: a 12-character ISIN is indexed as 57 n-grams (lengths 1 to 6) plus 6 prefix and 6 suffix edges. The build is the slowest of all seven, and every write makes the next search refresh the reader. Under a steady stream of writes that refresh is where Lucene's time goes.</div>
+  </section>
+
+  <section id="fix-rocks" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">06</span><h2>What it took to make RocksDB fast</h2></div>
+    <p>RocksDB can only do one thing quickly: walk a range of sorted keys. So the fix is to turn all three questions into <em>starts with</em> questions, by writing each entry several times in shapes where the answer is a prefix. A 259-line plan came first; it checked the binding's API, the key encoding and the edge cases before any code was written.</p>
+    <div class="stat-row">
+      <div class="stat"><b>76 → 294</b><span>lines of C#, after a 259-line written plan</span></div>
+      <div class="stat"><b>3</b><span>column families: prefix, reversed, rotations</span></div>
+      <div class="stat"><b>n + 2</b><span>keys per entry (14 for a 12-char ISIN)</span></div>
+      <div class="stat"><b id="rocks-gain">—</b><span>Filter, naive → tuned (Medium, single query)</span></div>
+    </div>
+    <div class="interactive" id="rockskeys-demo">
+      <div class="demo-heading"><div><span class="eyebrow">ONE ENTRY, n + 2 KEYS</span><h3>Writing (US99, #5) so every question is a prefix</h3></div><span class="demo-badge">RocksDbIndex.Stage</span></div>
+      <div class="demo-canvas" id="rockskeys-canvas"></div>
+      <div class="step-copy" id="rockskeys-copy" aria-live="polite"></div>
+      <div class="player" data-player="rockskeys"><button type="button" data-action="reset" aria-label="Restart">↺</button><button type="button" data-action="prev">← Back</button><button type="button" data-action="play">Play</button><button type="button" data-action="next">Next →</button><span class="step-count"></span></div>
+    </div>
+    <div class="table-scroll"><table class="fix-table"><caption>Naive → tuned, layer by layer</caption><thead><tr><th>Layer</th><th>NaiveRocksDbIndex</th><th>RocksDbIndex</th></tr></thead><tbody>
+      <tr><td>Key spaces</td><td>One: the Key</td><td>Three column families: Key, reversed UTF-8 bytes, one rotation per character with a 2-byte Repeat in front</td></tr>
+      <tr><td>EndsWith / Filter</td><td>Read every key, check in C#</td><td>Seek to the prefix, stop at an upper bound (<code>SetIterateUpperBound</code>): only hits are read</td></tr>
+      <tr><td>Duplicates in Filter</td><td>—</td><td>Repeat sorts first in the key, so only buckets below the fragment's length are read and every key read is a hit</td></tr>
+      <tr><td>Consistency</td><td>One key per write</td><td>One <code>WriteBatch</code> across all three families (atomic); one snapshot across Filter's buckets</td></tr>
+      <tr><td>Build</td><td>One <code>Put</code> per entry, write-ahead log on</td><td>Parallel 4,096-entry batches, no WAL, then <code>CompactRange</code> to one sorted file per family</td></tr>
+      <tr><td>Storage options</td><td>Defaults</td><td>Shared 512 MB LRU block cache, no compression</td></tr>
+      <tr><td>Results</td><td>New <code>byte[]</code> and string per hit</td><td><code>Utf8Hits</code>: hit bytes back to back, decoded only when read</td></tr>
+    </tbody></table></div>
+    <div class="note"><strong>What it still costs.</strong> RocksDB has no "how many keys in this range" and no random access by position. A result's <code>Count</code> means stepping over every hit through the native binding, about 120 ns each. A one-character prefix that matches most of the data is a long walk, even when the caller reads only ten hits.</div>
+  </section>
+
+  <section id="benchmarks" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">07</span><h2>The numbers</h2></div>
+    <p>All seven algorithms, one run, one machine, ISINs at Medium (100,000 entries). Bars are on a <strong>logarithmic scale</strong>: each gridline is ten times the previous one, otherwise the fastest results would be invisible. Shorter is better.</p>
+    <div class="chart-card" id="chart">
+      <div class="chart-controls">
+        <div class="segmented" role="tablist" aria-label="Scenario" id="chart-scenario"></div>
+        <div class="segmented" role="tablist" aria-label="Query" id="chart-query"></div>
+      </div>
+      <h3 class="chart-title" id="chart-title"></h3>
+      <p class="chart-sub" id="chart-sub"></p>
+      <div class="bars" id="chart-bars" role="img"></div>
+      <div class="chart-axis" id="chart-axis" aria-hidden="true"></div>
+      <div class="chart-legend"><span><i class="sw sw-sorted"></i>SortedArrayIndex</span><span><i class="sw sw-tuned"></i>Tuned engines</span><span><i class="sw sw-naive"></i>Naive engines</span><span><i class="sw sw-scan"></i>Scans</span></div>
+      <div class="chart-tip" id="chart-tip" role="tooltip" hidden></div>
+    </div>
+    <details><summary>Show every number as a table</summary><div class="detail-body"><div class="table-scroll"><table id="bench-table"></table></div></div></details>
+    <div class="view-grid" id="takeaways">
+      <article><span class="view-label">STARTS / ENDS WITH</span><h3>Two binary searches win</h3><p>The sorted array answers in under a microsecond and hands back a window onto its array without copying. The engines are fast only when few entries match: ISIN suffixes are selective, prefixes like <code>US91</code> are not, and paying per hit makes RocksDB's <code>StartsWith</code> slower than a plain scan.</p></article>
+      <article><span class="view-label">CONTAINS</span><h3>The cost per hit decides</h3><p>The sorted substring array and Lucene's n-grams beat the scans by more than an order of magnitude. RocksDB also reads only hits, but each one crosses into native code, so it lands close to the linear scan it was meant to replace.</p></article>
+      <article><span class="view-label">THE BILL</span><h3>Speed is paid for elsewhere</h3><p>Lucene has the slowest build by far and allocates gigabytes doing it. The sorted array has the slowest single write: each one copies its small sorted delta. It also keeps everything on the heap, where Lucene and RocksDB keep files on disk.</p></article>
+    </div>
+    <p class="caption" id="bench-provenance">BenchmarkDotNet short in-process job, 3 warmups and 5 iterations of 200 ms: good for orders of magnitude, not for small differences. Bars marked with a dash had no result.</p>
+  </section>
+
+  <section id="sorted" class="chapter">
+    <div class="chapter-heading"><span class="chapter-number">08</span><h2>Sorted arrays, in great detail</h2></div>
+    <p><code>SortedArrayIndex</code> keeps three sorted arrays (by prefix, by reversed suffix, and every starting position inside every key), finds each answer as one contiguous block with two binary searches, and collects writes in a small sorted delta that is merged in batches, while readers keep a consistent snapshot.</p>
+    <div class="hero-figure compact" aria-label="Searching US returns US12 and US99, while GB19 is outside the matching block.">
+      <div class="query-tag">Starts with <strong>"US"</strong></div>
+      <div class="array hero-array"><div class="cell muted"><small>0</small>GB19</div><div class="cell hit"><small>1 · start</small>US12</div><div class="cell hit"><small>2</small>US99</div><div class="edge-label">3<br><small>end</small></div></div>
+      <p>Arrange once. Find the edges. Return the block.</p>
+    </div>
+    <a class="primary-link big" href="sorted-array.html">Read the step-by-step walkthrough <span aria-hidden="true">→</span></a>
+    <p class="caption">Nine chapters with step players: building the views, finding both edges, de-duplicating contains hits, writes without rebuilding, merging, and readers versus writers.</p>
+  </section>
+  <footer>Built from the <a href="https://github.com/bulatgrzegorz/search-algorithms">search-algorithms</a> repository. Every step player runs in your browser; nothing is sent anywhere. <button type="button" id="print-page">Print / save as PDF</button></footer>
+</main>
+</div>
+</body>
+</html>

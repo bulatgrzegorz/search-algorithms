@@ -3,6 +3,9 @@
 BenchmarkDotNet comparison of string search algorithms (`GetByStartsWith`, `GetByEndsWith`, `Filter` = contains) on real ISINs,
 including live data (`Add` / `Remove` while searches run).
 
+Illustrated walkthrough with step-by-step examples and charts: https://bulatgrzegorz.github.io/search-algorithms/ (source in `site/`,
+published by `.github/workflows/pages.yml`; chart data from `benchmarks/site-data/`).
+
 ## Data
 
 ```sh
