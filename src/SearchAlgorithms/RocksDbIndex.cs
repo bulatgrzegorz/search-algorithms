@@ -10,8 +10,8 @@ namespace SearchAlgorithms;
 // Items GB19, US99 (· is Separator):
 //   default:   GB19, US99                                 GetByStartsWith: keys starting with the query
 //   suffix:    91BG, 99SU (UTF-8 bytes reversed)          GetByEndsWith: keys starting with the reversed query
-//   substring: one rotation item[o..]·item[..o] per offset, Repeat at o as the value
-//              US99: US99· (0), S99·U (0), 99·US (0), 9·US9 (1)
+//   substring: one rotation item[o..]·item[..o] per offset, after the 2-byte Repeat at o (big-endian, so keys sort by it first)
+//              US99: 0 US99·, 0 S99·U, 0 99·US, 1 9·US9
 // The memtable is the delta, compaction the merge, an iterator the snapshot: a search sees every write that returned before it.
 // Adding a present item or removing a missing one rewrites or deletes the same keys, so neither needs a check or a lock.
 // shortcut: keys are UTF-8, so a lone surrogate in an item or query turns into U+FFFD; use raw UTF-16 keys if such data appears.
@@ -26,6 +26,8 @@ public sealed class RocksDbIndex : ISearchAlgorithm
     private readonly WriteOptions _writeOptions = new WriteOptions().DisableWal(1);
     private readonly RocksDb _db;
     private readonly ColumnFamilyHandle _prefix, _suffix, _substring;
+    // Highest Repeat ever written, never lowered: Filter's buckets above it are empty, so it doesn't seek them.
+    private int _maxRepeat;
 
     // Writes the entry's item into hits (hits.Add gives the room), or nothing to skip it.
     private delegate void Decode(Iterator iterator, Utf8Hits hits);
@@ -90,32 +92,48 @@ public sealed class RocksDbIndex : ISearchAlgorithm
         });
     }
 
-    // Each item comes back once, from its first match: a later rotation is skipped when the fragment also starts at an
-    // earlier offset (fragment.Length <= Repeat). US99, Filter("9"): 99·US kept (0), 9·US9 skipped (1).
+    // Each item comes back once, from its first match: there Repeat < fragment.Length, at every later match Repeat >= fragment.Length
+    // (the fragment also starts earlier). So only buckets 0 .. fragment.Length - 1 are read, and every entry in them is a hit.
+    //   US99, Filter("9"): bucket 0 has 99·US -> US99; 9·US9 sits in bucket 1, never read.
+    // Against Repeat as the value (every entry walked, value read, duplicates skipped), Medium typeahead Filter:
+    // ISINs 19.9 -> 11.8 ms, names 16.0 -> 8.6 ms; single 3-6 char Filter ISINs 798 -> 682 us, names unchanged.
     public IReadOnlyList<string> Filter(string fragment)
     {
         // Every item contains "", also "" itself, which has no substring entry.
         if (fragment.Length == 0) return GetByStartsWith(fragment);
 
-        return Scan(_substring, Encoding.UTF8.GetBytes(fragment), (iterator, hits) =>
+        var utf8 = Encoding.UTF8.GetBytes(fragment);
+        var hits = new Utf8Hits();
+        // Every bucket's iterator reads this one snapshot, so the search is one point in time (without it, a Remove then Add
+        // between two buckets' iterators could return both items). _maxRepeat is read after taking it: Stage raises it before
+        // writing, so every batch the snapshot holds has already raised it.
+        using var snapshot = _db.CreateSnapshot();
+        var buckets = Math.Min(fragment.Length, Volatile.Read(ref _maxRepeat) + 1);
+        for (var repeat = 0; repeat < buckets; repeat++)
         {
-            var key = iterator.GetKeySpan();
-            var value = iterator.GetValueSpan();
-
-            if (fragment.Length <= BinaryPrimitives.ReadUInt16LittleEndian(value)) return;
-            var tail = key.IndexOf(Separator);
-            var item = hits.Add(key.Length - 1);
-            key[..tail].CopyTo(item[^tail..]);
-            key[(tail + 1)..].CopyTo(item);
-        });
+            var key = new byte[2 + utf8.Length];
+            BinaryPrimitives.WriteUInt16BigEndian(key, (ushort)repeat);
+            utf8.CopyTo(key, 2);
+            Scan(_substring, key, static (iterator, hits) =>
+            {
+                var rotation = iterator.GetKeySpan()[2..];
+                var tail = rotation.IndexOf(Separator);
+                var item = hits.Add(rotation.Length - 1);
+                rotation[..tail].CopyTo(item[^tail..]);
+                rotation[(tail + 1)..].CopyTo(item);
+            }, hits, snapshot);
+        }
+        return hits;
     }
 
-    // Every entry of family whose key starts with key, decoded.
+    // Every entry of family whose key starts with key, decoded into hits (a new list unless given one to add to),
+    // as of snapshot when given, else as of now.
     // Count still walks every hit (~120 ns each through the binding); only the string per hit is saved, see Utf8Hits.
-    private Utf8Hits Scan(ColumnFamilyHandle family, byte[] key, Decode decode)
+    private Utf8Hits Scan(ColumnFamilyHandle family, byte[] key, Decode decode, Utf8Hits? hits = null, Snapshot? snapshot = null)
     {
         var options = new ReadOptions();
-        
+        if (snapshot is not null) options.SetSnapshot(snapshot);
+
         // We are adding 1 or last byte (turning 'US' -> 'UT'),
         // that's the smallest byte string that sorts after every string starting with 'US'
         // SetIterateUpperBound tells RocksDB to stop there (exclusive),
@@ -127,7 +145,7 @@ public sealed class RocksDbIndex : ISearchAlgorithm
             options.SetIterateUpperBound(bound);
         }
 
-        var hits = new Utf8Hits();
+        hits ??= new Utf8Hits();
         using (var iterator = _db.NewIterator(family, options))
         {
             if (key.Length > 0) iterator.Seek(key);
@@ -155,8 +173,8 @@ public sealed class RocksDbIndex : ISearchAlgorithm
     private void Stage(WriteBatch batch, string item, bool remove)
     {
         var utf8 = Encoding.UTF8.GetBytes(item);
-        var key = new byte[utf8.Length + 1];
-        Span<byte> repeat = stackalloc byte[2];
+        // Room for the longest key: 2-byte Repeat + rotation + separator.
+        var key = new byte[2 + utf8.Length + 1];
 
         Put(utf8, []);
         utf8.CopyTo(key, 0);
@@ -168,14 +186,22 @@ public sealed class RocksDbIndex : ISearchAlgorithm
         int o = 0, b = 0;
         foreach (var rune in item.EnumerateRunes())
         {
-            // write each key as item[o..] + 0xFF + item[..o] | US99 -> 99·US (o = b = 2)
-            utf8.AsSpan(b).CopyTo(key);
-            key[utf8.Length - b] = Separator;
-            utf8.AsSpan(0, b).CopyTo(key.AsSpan(utf8.Length - b + 1));
-            
+            // write each key as Repeat + item[o..] + 0xFF + item[..o] | US99 -> 0 99·US (o = b = 2)
+            // Remove needs Repeat too: it is part of the key.
             // shortcut: Repeat is 2 bytes, so items are limited to 65,535 chars; widen it if longer ones appear.
-            if (!remove) BinaryPrimitives.WriteUInt16LittleEndian(repeat, checked((ushort)RepeatAt(item, o)));
-            Put(key, repeat, _substring);
+            var repeat = checked((ushort)RepeatAt(item, o));
+            BinaryPrimitives.WriteUInt16BigEndian(key, repeat);
+            utf8.AsSpan(b).CopyTo(key.AsSpan(2));
+            key[2 + utf8.Length - b] = Separator;
+            utf8.AsSpan(0, b).CopyTo(key.AsSpan(2 + utf8.Length - b + 1));
+            Put(key, [], _substring);
+            // Before the batch is written, so a search that sees this key also reads its bucket.
+            if (!remove)
+            {
+                for (var max = _maxRepeat; repeat > max; max = _maxRepeat)
+                    Interlocked.CompareExchange(ref _maxRepeat, repeat, max);
+            }
+                
 
             o += rune.Utf16SequenceLength; //chars consumed -> 1 or 2
             b += rune.Utf8SequenceLength; // bytes consumer -> 1-4 bytes

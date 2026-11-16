@@ -36,6 +36,51 @@ public class RocksDbIndexTests
         AssertItems(index.Filter("AA"), "AAAA");
     }
 
+    // ABAB's rotations sit in Repeat buckets 0, 0, 2, 1; Remove must find them there.
+    [Fact]
+    public async Task MultiCharRepeatsComeBackOnceAndRemoveFully()
+    {
+        await using var index = new RocksDbIndex(["ABAB", "XABX"]);
+
+        AssertItems(index.Filter("AB"), "ABAB", "XABX");
+        AssertItems(index.Filter("BA"), "ABAB");
+        AssertItems(index.Filter("ABA"), "ABAB");
+        AssertItems(index.Filter("ABAB"), "ABAB");
+
+        index.Remove("ABAB");
+        AssertItems(index.Filter("B"), "XABX");
+        Assert.Empty(index.Filter("BA"));
+    }
+
+    // Filter("AC") reads two Repeat buckets: ACXX's match is in bucket 0, ABAC's in bucket 1. The writer never lets both exist
+    // at once, so a search that sees both read its buckets at different points in time.
+    [Fact]
+    public async Task FilterSeesOnePointInTime()
+    {
+        await using var index = new RocksDbIndex(["ACXX"]);
+        using var stop = new CancellationTokenSource();
+        var writer = Task.Run(() =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                index.Remove("ACXX");
+                index.Add("ABAC");
+                index.Remove("ABAC");
+                index.Add("ACXX");
+            }
+        });
+
+        try
+        {
+            Parallel.For(0, 20_000, _ => Assert.True(index.Filter("AC").Count <= 1));
+        }
+        finally
+        {
+            stop.Cancel();
+            await writer;
+        }
+    }
+
     // Results are decoded on read: by index, by enumeration, and past the end.
     [Fact]
     public async Task ResultsReadByIndexMatchEnumeration()
