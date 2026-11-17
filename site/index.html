@@ -60,7 +60,7 @@
       <li><strong>Same answers.</strong> <code>dotnet test</code> checks every implementation against a plain LINQ scan, also after adds and removes.</li>
     </ul>
     <div class="view-grid">
-      <article><span class="view-label">THE DATA</span><h3>Real ISINs</h3><p>~9.4 million unique 12-character securities identifiers from GLEIF's ISIN→LEI mapping, such as <code>US0378331005</code>.</p><p class="caption">Medium = a seeded random sample of <strong>100,000</strong>. Small (10k) is a subset of it.</p></article>
+      <article><span class="view-label">THE DATA</span><h3>Real ISINs</h3><p>~9.4 million unique 12-character securities identifiers from GLEIF's ISIN→LEI mapping, such as <code>US0378331005</code>.</p><p class="caption">Medium = a seeded random sample of <strong>100,000</strong>. Small (10k) is a subset of it, Huge (1M) a superset.</p><p class="caption">The Updates chart also runs on ~3.4 million <strong>legal entity names</strong> from GLEIF, such as <code>Whisky &amp; Genuss Dresden GmbH</code>: 26 characters on average, up to 307, in many scripts.</p></article>
       <article><span class="view-label">THE QUERIES</span><h3>3–6 character cuts</h3><p>Prefixes, suffixes and middle fragments cut from random items with a fixed seed, so every algorithm answers exactly the same queries.</p><p class="caption">Short queries are the hard ones: they match many items.</p></article>
       <article><span class="view-label">THE HARNESS</span><h3>BenchmarkDotNet</h3><p>Mean time per operation and bytes allocated. A separate process per index measures retained memory.</p><p class="caption" id="machine-note">Apple M2, 8 cores.</p></article>
     </div>
@@ -70,7 +70,7 @@
       <tr><td>Typeahead</td><td>One search per keystroke of a 3–6 character query, reading only the first 10 hits.</td><td>A search box. Indexes that copy every hit up front pay for hits nobody reads.</td></tr>
       <tr><td>Build</td><td>The constructor: index 100,000 entries from scratch.</td><td>Startup and rebuild cost.</td></tr>
       <tr><td>Add / Remove</td><td>One write, single-threaded.</td><td>The cost of keeping the index live.</td></tr>
-      <tr><td>Updates at 1M</td><td>One update (<code>Remove</code> + <code>Add</code>) at 1,000,000 entries, 10,000 in a row.</td><td>Sustained writes, including the batched work (merges, compactions) that a few writes never trigger.</td></tr>
+      <tr><td>Updates</td><td>One update (<code>Remove</code> + <code>Add</code>), 10,000 in a row, at 100,000 and 1,000,000 entries, on ISINs and on legal entity names.</td><td>Sustained writes, including the batched work (merges, compactions) that a few writes never trigger.</td></tr>
       <tr><td>Memory</td><td>Build in a fresh process, then measure retained heap, process RSS and files on disk.</td><td>What the index costs to keep around.</td></tr>
     </tbody></table></div>
   </section>
@@ -201,7 +201,7 @@
 
   <section id="benchmarks" class="chapter">
     <div class="chapter-heading"><span class="chapter-number">07</span><h2>The numbers</h2></div>
-    <p>All seven algorithms, one run, one machine, ISINs at Medium (100,000 entries) except "Updates at 1M". Bars are on a <strong>logarithmic scale</strong>: each gridline is ten times the previous one, otherwise the fastest results would be invisible. Shorter is better.</p>
+    <p>All seven algorithms, one run, one machine, ISINs at Medium (100,000 entries) except "Updates", which also covers 1,000,000 entries and the names dataset. Bars are on a <strong>logarithmic scale</strong>: each gridline is ten times the previous one, otherwise the fastest results would be invisible. Shorter is better.</p>
     <div class="chart-card" id="chart">
       <div class="chart-controls">
         <div class="segmented" role="tablist" aria-label="Scenario" id="chart-scenario"></div>
@@ -218,7 +218,7 @@
     <div class="view-grid" id="takeaways">
       <article><span class="view-label">STARTS / ENDS WITH</span><h3>Two binary searches win</h3><p>The sorted array answers in under a microsecond and hands back a window onto its array without copying. The engines are fast only when few entries match: ISIN suffixes are selective, prefixes like <code>US91</code> are not, and paying per hit makes RocksDB's <code>StartsWith</code> slower than a plain scan.</p></article>
       <article><span class="view-label">CONTAINS</span><h3>The cost per hit decides</h3><p>The sorted substring array and Lucene's n-grams beat the scans by more than an order of magnitude. RocksDB also reads only hits, but each one crosses into native code, so it lands close to the linear scan it was meant to replace.</p></article>
-      <article><span class="view-label">THE BILL</span><h3>Speed is paid for elsewhere</h3><p>Lucene has the slowest build by far and allocates gigabytes doing it. The sorted array has the slowest writes: most only copy its small sorted delta, but every few thousand a merge rewrites all three arrays (about 220 MB at 1,000,000 entries). Counted in, as in "Updates at 1M", it stays the slowest. It also keeps everything on the heap, where Lucene and RocksDB keep files on disk.</p></article>
+      <article><span class="view-label">THE BILL</span><h3>Speed is paid for elsewhere</h3><p>Lucene has the slowest build by far and allocates gigabytes doing it. The sorted array has the slowest writes: most only copy its small sorted delta, but every few thousand a merge rewrites all three arrays (about 220 MB at 1,000,000 entries). Counted in, as in "Updates", it stays the slowest. It also keeps everything on the heap, where Lucene and RocksDB keep files on disk.</p></article>
     </div>
     <p class="caption" id="bench-provenance">BenchmarkDotNet short in-process job, 3 warmups and 5 iterations of 200 ms: good for orders of magnitude, not for small differences. Bars marked with a dash had no result.</p>
   </section>

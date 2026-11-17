@@ -233,6 +233,12 @@
   const bytes = b => b < 1024 ? `${Math.round(b)} B` : b < 1048576 ? `${(b / 1024).toPrecision(3)} KB` : b < 1073741824 ? `${(b / 1048576).toPrecision(3)} MB` : `${(b / 1073741824).toPrecision(3)} GB`;
   const tickTime = ns => ns < 1e3 ? `${ns} ns` : ns < 1e6 ? `${ns / 1e3} μs` : ns < 1e9 ? `${ns / 1e6} ms` : `${ns / 1e9} s`;
   const tickBytes = b => bytes(b).replace(/\.0+ /, " ");
+  // Updates tab: which dataset and Size each choice shows, and what makes the datasets differ.
+  const updateRuns = { "ISIN · 100k": ["isin", "Medium"], "ISIN · 1M": ["isin", "Huge"], "Names · 100k": ["names", "Medium"], "Names · 1M": ["names", "Huge"] };
+  const datasets = {
+    isin: "ISINs: every key is 12 characters from A–Z and 0–9, so SortedArrayIndex keeps 12 substring entries per item.",
+    names: "Legal entity names: 26 characters on average (up to 307), with spaces, punctuation and about 900 distinct characters across scripts. That is twice the substring entries per item of an ISIN for SortedArrayIndex to rewrite on each merge, and more n-grams per item for Lucene."
+  };
   function scenarios(B) {
     const search = (writes, size = "Medium") => q => B.search.filter(r => r.method === q && r.writes === writes && r.size === size);
     return [
@@ -241,7 +247,8 @@
       { id: "typeahead", label: "Typeahead", queries: [...new Set(B.typeahead.map(r => r.method))], rows: q => B.typeahead.filter(r => r.method === q), title: q => `Typeahead, ${q}`, sub: "One search per keystroke of a 3–6 character query, first 10 hits read. Time per typed query.", unit: "time" },
       { id: "build", label: "Build", queries: ["Time", "Allocated"], rows: q => B.build.map(r => ({ ...r, mean: q === "Time" ? r.mean : r.allocated })), title: q => q === "Time" ? "Building the index from 100,000 entries" : "Bytes allocated while building", sub: "The constructor, start to finish.", unit: q => q === "Time" ? "time" : "bytes" },
       { id: "writes1", label: "Add / Remove", queries: [...new Set(B.mutation.map(r => r.method))], rows: q => B.mutation.filter(r => r.method === q), title: q => `One ${q}`, sub: "Single-threaded cost of one write. For Lucene, part of the cost moves to the next search's refresh.", unit: "time" },
-      { id: "updates", label: "Updates at 1M", queries: ["Update"], rows: () => B.update ?? [], title: () => "One update (Remove + Add), 1,000,000 entries", sub: "Single-threaded, 10,000 updates in a row per iteration: long enough to include SortedArrayIndex's merges, which a few writes never reach. Mean per update.", unit: "time" },
+      { id: "updates", label: "Updates", queries: Object.keys(updateRuns), rows: q => (B.update ?? []).filter(r => r.dataset === updateRuns[q][0] && r.size === updateRuns[q][1]), title: q => `One update (Remove + Add), ${q.replace("100k", "100,000").replace("1M", "1,000,000")} entries`,
+        sub: q => `${datasets[updateRuns[q][0]]} Single-threaded, 10,000 updates in a row per iteration: long enough to include SortedArrayIndex's merges, which a few writes never reach. Mean per update.`, unit: "time" },
       { id: "memory", label: "Memory", queries: ["Heap", "Disk"], // Footprint reports whole MB: a 0 heap is under 1 MB, drawn at 0.5 MB; a 0 disk means no files.
         rows: q => B.footprint.map(r => q === "Heap" && !r.heap ? { algorithm: r.algorithm, mean: 524288, label: "< 1 MB" } : { algorithm: r.algorithm, mean: r[q.toLowerCase()] }).filter(r => r.mean > 0), title: q => ({ Heap: "Managed heap retained after build", Disk: "Files on disk" })[q], sub: "100,000 entries, one fresh process per index. Heap is managed memory only (RocksDB's native cache is not in it); indexes with nothing on disk show a dash.", unit: "bytes" }
     ];
@@ -264,7 +271,7 @@
       const rows = current.rows(query).filter(r => r.mean > 0).sort((a, b) => a.mean - b.mean);
       const missing = Object.keys(families).filter(a => !rows.some(r => r.algorithm === a));
       $("chart-title").textContent = current.title(query);
-      $("chart-sub").textContent = current.sub;
+      $("chart-sub").textContent = typeof current.sub === "function" ? current.sub(query) : current.sub;
       if (!rows.length) { $("chart-bars").innerHTML = '<p class="empty-value">No results for this view.</p>'; $("chart-axis").innerHTML = ""; return; }
       // Gridlines at 1, 10, 100 of each unit: ns-based powers of ten for time, B/KB/MB/GB (1024-based) for bytes.
       const ticks = unit === "time" ? [...Array(13)].map((_, k) => 10 ** k) : [...Array(12)].map((_, i) => 1024 ** Math.floor(i / 3) * 10 ** (i % 3));
