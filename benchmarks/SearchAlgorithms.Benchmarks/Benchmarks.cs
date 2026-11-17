@@ -170,6 +170,43 @@ public class MutationBenchmarks
     public void UndoRemove() { foreach (var x in _removable) _algorithm.Add(x); _i = 0; }
 }
 
+// Sustained writes: one invocation = one update (Remove + Add, like Writer), so the size stays constant and no cleanup is needed.
+// MutationBenchmarks' 1000 ops never reach SortedArrayIndex's merge at Huge (3,906 pending), hiding its real cost; an iteration
+// here is long enough to include several merges (or compactions, refreshes) on every Size.
+[InvocationCount(Updates)]
+public class UpdateBenchmarks
+{
+    private const int Updates = 10_000;
+
+    [ParamsAllValues] public Scale Size;
+    [ParamsSource(nameof(AlgorithmNames))] public string Algorithm = "";
+    public static IEnumerable<string> AlgorithmNames => Selected.AlgorithmNames;
+
+    private ISearchAlgorithm _algorithm = null!;
+    private Entry[] _present = [], _absent = [];
+    private int _i;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        var all = Dataset.Load((int)Size + Updates);
+        _algorithm = Algorithms.All[Algorithm](all[..(int)Size]);
+        (_present, _absent) = (all[..Updates], all[(int)Size..]);
+    }
+
+    [GlobalCleanup] public Task Cleanup() => _algorithm.DisposeAsync().AsTask();
+
+    // Each iteration swaps every pair once, so the next swaps them back.
+    [Benchmark]
+    public void Update()
+    {
+        var k = _i++ % Updates;
+        _algorithm.Remove(_present[k]);
+        _algorithm.Add(_absent[k]);
+        (_present[k], _absent[k]) = (_absent[k], _present[k]);
+    }
+}
+
 // Index build cost; Allocated approximates the index's memory footprint.
 // One build per iteration, so each instance is disposed outside the measurement.
 [InvocationCount(1)]
