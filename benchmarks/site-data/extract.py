@@ -23,6 +23,7 @@ for path in sorted(glob.glob(os.path.join(results, "*", "results", "*-report-ful
         params = dict(p.split("=", 1) for p in b["Parameters"].split("&"))
         data[suites[b["Type"]]].append({
             "algorithm": params["Algorithm"],
+            "dataset": "names" if "-names-" in path else "isin",  # run.sh puts the dataset in the label of the runs that change it
             "method": b["Method"],
             "size": params.get("Size"),
             "writes": int(params.get("WritesPerSecond", 0)),
