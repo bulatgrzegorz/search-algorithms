@@ -1,5 +1,5 @@
 #!/bin/bash
-# One consistent pass over all 7 algorithms (ISINs, Medium) for the GitHub Pages charts. Resumable: a label with a .ok file is skipped.
+# One consistent pass over all 7 algorithms (ISINs, Medium; updates at Huge) for the GitHub Pages charts. Resumable: a label with a .ok file is skipped.
 # Every algorithm must be registered in Algorithms.All. Build first, then:
 #   benchmarks/site-data/run.sh <results dir> && benchmarks/site-data/extract.py <results dir> site/assets/bench-data.js
 set -uo pipefail
@@ -28,6 +28,7 @@ for algorithm in SortedArrayIndex RocksDbIndex LuceneIndex LinearScan Concurrent
     '*SearchBenchmarks*(Requests:?1,?WritesPerSecond:?1000,*Size:?Medium)'
   run "typeahead-$algorithm" "${bdn[@]}" --artifacts "$out/typeahead-$algorithm" --filter '*TypeaheadBenchmarks*Size:?Medium)'
   run "build-mutation-$algorithm" "${bdn[@]}" --artifacts "$out/build-mutation-$algorithm" --filter '*BuildBenchmarks*Size:?Medium)' '*MutationBenchmarks*Size:?Medium)'
+  run "updates-$algorithm" "${bdn[@]}" --artifacts "$out/updates-$algorithm" --filter '*UpdateBenchmarks*Size:?Huge)'
   run "footprint-$algorithm" footprint 100000
 done
 echo "ALL COMPLETE $(date +%T)"

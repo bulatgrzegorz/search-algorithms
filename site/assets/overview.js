@@ -241,6 +241,7 @@
       { id: "typeahead", label: "Typeahead", queries: [...new Set(B.typeahead.map(r => r.method))], rows: q => B.typeahead.filter(r => r.method === q), title: q => `Typeahead, ${q}`, sub: "One search per keystroke of a 3–6 character query, first 10 hits read. Time per typed query.", unit: "time" },
       { id: "build", label: "Build", queries: ["Time", "Allocated"], rows: q => B.build.map(r => ({ ...r, mean: q === "Time" ? r.mean : r.allocated })), title: q => q === "Time" ? "Building the index from 100,000 entries" : "Bytes allocated while building", sub: "The constructor, start to finish.", unit: q => q === "Time" ? "time" : "bytes" },
       { id: "writes1", label: "Add / Remove", queries: [...new Set(B.mutation.map(r => r.method))], rows: q => B.mutation.filter(r => r.method === q), title: q => `One ${q}`, sub: "Single-threaded cost of one write. For Lucene, part of the cost moves to the next search's refresh.", unit: "time" },
+      { id: "updates", label: "Updates at 1M", queries: ["Update"], rows: () => B.update ?? [], title: () => "One update (Remove + Add), 1,000,000 entries", sub: "Single-threaded, 10,000 updates in a row per iteration: long enough to include SortedArrayIndex's merges, which a few writes never reach. Mean per update.", unit: "time" },
       { id: "memory", label: "Memory", queries: ["Heap", "Disk"], // Footprint reports whole MB: a 0 heap is under 1 MB, drawn at 0.5 MB; a 0 disk means no files.
         rows: q => B.footprint.map(r => q === "Heap" && !r.heap ? { algorithm: r.algorithm, mean: 524288, label: "< 1 MB" } : { algorithm: r.algorithm, mean: r[q.toLowerCase()] }).filter(r => r.mean > 0), title: q => ({ Heap: "Managed heap retained after build", Disk: "Files on disk" })[q], sub: "100,000 entries, one fresh process per index. Heap is managed memory only (RocksDB's native cache is not in it); indexes with nothing on disk show a dash.", unit: "bytes" }
     ];
@@ -298,7 +299,7 @@
     // Full table for readers who want the numbers, and as the non-visual view.
     const names = Object.keys(families);
     const cols = list.flatMap(s => s.queries.map(q => ({ s, q })));
-    $("bench-table").innerHTML = `<caption>Medium (100,000 ISINs). Times are means; memory from a fresh process.</caption><thead><tr><th>Scenario</th>${names.map(a => `<th>${a}</th>`).join("")}</tr></thead><tbody>${cols.map(({ s, q }) => {
+    $("bench-table").innerHTML = `<caption>Medium (100,000 ISINs) unless the scenario says otherwise. Times are means; memory from a fresh process.</caption><thead><tr><th>Scenario</th>${names.map(a => `<th>${a}</th>`).join("")}</tr></thead><tbody>${cols.map(({ s, q }) => {
       const unit = typeof s.unit === "function" ? s.unit(q) : s.unit, fmt = unit === "time" ? time : bytes;
       return `<tr><td>${escape(s.label)} · ${escape(q)}</td>${names.map(a => { const r = s.rows(q).find(r => r.algorithm === a); return `<td>${r ? r.label ?? fmt(r.mean) : "—"}</td>`; }).join("")}</tr>`;
     }).join("")}</tbody>`;

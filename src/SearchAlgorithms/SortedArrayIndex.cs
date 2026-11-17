@@ -170,26 +170,32 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         var next = new Snapshot(
             MergeSorted<Entry, PrefixOrder>(b.ByPrefix, removed.ByPrefix, added.ByPrefix).ToArray(),
             MergeSorted<Entry, SuffixOrder>(b.BySuffix, removed.BySuffix, added.BySuffix).ToArray(),
-            MergeSorted<Substring, SubstringOrder>(b.Substrings, [.. removed.ByPrefix.SelectMany(SubstringsOf)], [.. added.ByPrefix.SelectMany(SubstringsOf).Order(default(SubstringOrder))]).ToArray());
+            MergeSorted<Substring, SubstringOrder>(b.Substrings, removed.ByPrefix.SelectMany(SubstringsOf).ToArray(),
+                added.ByPrefix.SelectMany(SubstringsOf).Order(default(SubstringOrder)).ToArray(), parallel: true).ToArray());
         return new State(next, Added: Delta.Empty, Removed: Delta.Empty);
     }
 
     // sorted without `removed`, plus `added`, both of them in TOrder (a total order). Every removed entry is in sorted and no added
     // one is, so each one's place is one binary search, and Merged copies the stretches between those places whole.
     // `removed` may be in any order: sorting its places (ints) is cheaper than sorting it (Merge's removed substrings).
-    private static Merged<T> MergeSorted<T, TOrder>(ArraySegment<T> sorted, ReadOnlySpan<T> removed, ReadOnlySpan<T> added) where TOrder : struct, IOrder<T>
+    // parallel: the searches are independent; Merge's substring ones (~47k over 12M entries on Huge) were half its time on one core.
+    private static Merged<T> MergeSorted<T, TOrder>(ArraySegment<T> sorted, ArraySegment<T> removed, ArraySegment<T> added, bool parallel = false) where TOrder : struct, IOrder<T>
     {
-        var removedAt = new int[removed.Length];
-        for (var i = 0; i < removed.Length; i++) 
-            removedAt[i] = sorted.AsSpan().BinarySearch(removed[i], default(TOrder));
-        
-        Array.Sort(removedAt);
-        
+        var removedAt = new int[removed.Count];
         // In order, since added is, so items that go to the same place go there in order.
-        var addedAt = new (int At, T Item)[added.Length];
-        for (var i = 0; i < added.Length; i++) 
-            addedAt[i] = (~sorted.AsSpan().BinarySearch(added[i], default(TOrder)), added[i]);
-        
+        var addedAt = new (int At, T Item)[added.Count];
+
+        // i < removed.Count: a removed entry's index, else an added one's insertion point.
+        void Place(int i)
+        {
+            if (i < removed.Count) removedAt[i] = sorted.AsSpan().BinarySearch(removed[i], default(TOrder));
+            else addedAt[i - removed.Count] = (~sorted.AsSpan().BinarySearch(added[i - removed.Count], default(TOrder)), added[i - removed.Count]);
+        }
+
+        if (parallel) Parallel.For(0, removed.Count + added.Count, Place);
+        else for (var i = 0; i < removed.Count + added.Count; i++) Place(i);
+
+        Array.Sort(removedAt);
         return new Merged<T>(sorted, removedAt, addedAt);
     }
 
@@ -224,7 +230,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     // The entries where TOrder.CompareToQuery returns 0. It is < 0 before that block and > 0 after it,
     // so Start = first entry with compare >= 0, End = first entry with compare > 0.
     // ByPrefix [GB19, US12, US99] with PrefixOrder, "US": [< 0, 0, 0] -> [1, 3)
-    // A miss is an empty block:                         "FR": [> 0, > 0, > 0] -> [0, 0)
+    // A miss is an empty block:                     "FR": [> 0, > 0, > 0] -> [0, 0)
     private static ArraySegment<T> FindBlock<T, TOrder>(T[] sorted, string query) where TOrder : IOrder<T>
     {
         // A Boundary never equals an entry, so BinarySearch always misses and returns ~(index where the boundary would go).

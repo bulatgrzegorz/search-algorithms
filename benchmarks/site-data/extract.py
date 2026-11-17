@@ -10,8 +10,8 @@ import re
 import sys
 
 results, output = sys.argv[1], sys.argv[2]
-data = {"search": [], "typeahead": [], "build": [], "mutation": [], "footprint": []}
-suites = {"SearchBenchmarks": "search", "TypeaheadBenchmarks": "typeahead", "BuildBenchmarks": "build", "MutationBenchmarks": "mutation"}
+data = {"search": [], "typeahead": [], "build": [], "mutation": [], "update": [], "footprint": []}
+suites = {"SearchBenchmarks": "search", "TypeaheadBenchmarks": "typeahead", "BuildBenchmarks": "build", "MutationBenchmarks": "mutation", "UpdateBenchmarks": "update"}
 host = None
 
 for path in sorted(glob.glob(os.path.join(results, "*", "results", "*-report-full-compressed.json"))):
