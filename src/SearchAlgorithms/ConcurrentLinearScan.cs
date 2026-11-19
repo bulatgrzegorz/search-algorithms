@@ -6,7 +6,7 @@ namespace SearchAlgorithms;
 // so searches never block, but a search running during writes may or may not see them.
 public sealed class ConcurrentLinearScan(Entry[] items) : ISearchAlgorithm
 {
-    readonly ConcurrentDictionary<Entry, byte> _items = new(items.Select(x => KeyValuePair.Create(x, (byte)0)));
+    private readonly ConcurrentDictionary<Entry, byte> _items = new(items.Select(x => KeyValuePair.Create(x, (byte)0)));
 
     public IReadOnlyList<Entry> GetByStartsWith(string prefix) =>
         FindAll(x => x.StartsWith(prefix, StringComparison.Ordinal));
@@ -24,6 +24,6 @@ public sealed class ConcurrentLinearScan(Entry[] items) : ISearchAlgorithm
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     // Enumerating the dictionary is lock-free; .Keys would take every lock and copy.
-    List<Entry> FindAll(Func<string, bool> match) =>
+    private List<Entry> FindAll(Func<string, bool> match) =>
         _items.Where(x => match(x.Key.Key)).Select(x => x.Key).ToList();
 }

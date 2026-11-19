@@ -212,9 +212,11 @@ internal sealed class IdCollector(Func<AtomicReader, Entry[]> idsByDoc, int capa
 // An entry's id term is "Id:Key": both, since an entry is both. Id has no ':', so the first one splits them.
 internal static class DocumentExtensions
 {
-    public static string IdText(this Entry entry) => string.Create(CultureInfo.InvariantCulture, $"{entry.Id}:{entry.Key}");
-
-    public static Term IdTerm(this Entry entry) => new("id", entry.IdText());
+    extension(Entry entry)
+    {
+        public string IdText() => string.Create(CultureInfo.InvariantCulture, $"{entry.Id}:{entry.Key}");
+        public Term IdTerm() => new("id", entry.IdText());
+    }
 
     public static Entry ParseId(string text)
     {

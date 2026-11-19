@@ -38,8 +38,13 @@ public sealed class NaiveLuceneIndex : ISearchAlgorithm
     {
         using var reader = DirectoryReader.Open(_indexWriter, applyAllDeletes: true);
         var searcher = new IndexSearcher(reader);
+        
         var topDocs = searcher.Search(new WildcardQuery(new Term("value", pattern)), int.MaxValue);
-        return topDocs.ScoreDocs.Select(x => searcher.Doc(x.Doc)).Select(d => new Entry(d.Get("value"), d.GetField("id").GetInt32Value()!.Value)).ToList();
+        
+        return topDocs.ScoreDocs
+            .Select(x => searcher.Doc(x.Doc))
+            .Select(d => new Entry(d.Get("value"), d.GetField("id").GetInt32Value()!.Value))
+            .ToList();
     }
 
     // WildcardQuery's special characters, so queries stay literal.
@@ -61,5 +66,9 @@ public sealed class NaiveLuceneIndex : ISearchAlgorithm
     }
 
     private static Document CreateDocument(Entry x) =>
-        [new StringField("value", x.Key, Field.Store.YES), new StoredField("id", x.Id), new StringField("entry", x.IdText(), Field.Store.NO)];
+        [
+            new StringField("value", x.Key, Field.Store.YES), 
+            new StoredField("id", x.Id), 
+            new StringField("entry", x.IdText(), Field.Store.NO)
+        ];
 }

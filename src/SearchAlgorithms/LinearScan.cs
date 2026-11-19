@@ -3,8 +3,8 @@ namespace SearchAlgorithms;
 // Baseline: no index, checks every item on every query. Searches share a read lock, writes take it exclusively.
 public sealed class LinearScan(Entry[] items) : ISearchAlgorithm
 {
-    readonly HashSet<Entry> _items = new(items);
-    readonly ReaderWriterLockSlim _lock = new();
+    private readonly HashSet<Entry> _items = [..items];
+    private readonly ReaderWriterLockSlim _lock = new();
 
     public IReadOnlyList<Entry> GetByStartsWith(string prefix) =>
         FindAll(x => x.StartsWith(prefix, StringComparison.Ordinal));
@@ -35,7 +35,7 @@ public sealed class LinearScan(Entry[] items) : ISearchAlgorithm
         return ValueTask.CompletedTask;
     }
 
-    List<Entry> FindAll(Func<string, bool> match)
+    private List<Entry> FindAll(Func<string, bool> match)
     {
         _lock.EnterReadLock();
         try { return _items.Where(x => match(x.Key)).ToList(); }
