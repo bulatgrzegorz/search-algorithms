@@ -16,8 +16,11 @@ namespace SearchAlgorithms;
 public sealed class SortedArrayIndex : ISearchAlgorithm
 {
     // Pending changes (Added + Removed) that trigger a merge. A merge copies every item (128 B per ISIN), so the threshold grows
-    // with them, 1 per 256 items, and each write's share of a merge stays ~33 KB (Huge: 3,906 pending instead of 256 cut it from 814 KB).
-    private int MergeThreshold => Math.Max(256, _items.Count / 256);
+    // with them, 1 per 128 items, and each write's share of a merge stays ~16 KB (Huge: 3,906 pending instead of 256 cut it from 814 KB).
+    // Swept n/64 to n/1024: n/128 had the fastest updates (vs n/256: ISIN 1M -9%, names 1M -26%, ISIN 100k -29%); merging more
+    // often cost more than the smaller deltas saved, n/64's deltas were too big to copy per write. Searches under writes pay for the
+    // bigger delta: StartsWith at 100k 1.65 -> 2.82 us.
+    private int MergeThreshold => Math.Max(256, _items.Count / 128);
 
     private readonly Lock _writeLock = new();
     // Writers only, under _writeLock: makes Add of a present item and Remove of a missing one no-ops.
