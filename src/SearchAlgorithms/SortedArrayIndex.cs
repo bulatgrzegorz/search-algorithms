@@ -12,10 +12,11 @@ namespace SearchAlgorithms;
 //   BySuffix   = [US12, GB19, US99]   EndsWith("9")    -> block [1, 3) = GB19, US99
 //   Substrings = 12 entries           Filter("9")      -> block [3, 6) = GB19, US99, US99 -> GB19, US99
 //     (US12, 2) "12", (GB19, 2) "19", (US12, 3) "2", (GB19, 3) "9", (US99, 3) "9", (US99, 2) "99", (GB19, 1) "B19", ...
+//     (an entry names its item by its index in ByPrefix: (US12, 2) is (1, 2))
 public sealed class SortedArrayIndex : ISearchAlgorithm
 {
-    // Pending changes (Added + Removed) that trigger a merge. A merge copies every item (224 B per ISIN), so the threshold grows
-    // with them, 1 per 256 items, and each write's share of a merge stays ~57 KB (Huge: 3,906 pending instead of 256 cut it from 814 KB).
+    // Pending changes (Added + Removed) that trigger a merge. A merge copies every item (128 B per ISIN), so the threshold grows
+    // with them, 1 per 256 items, and each write's share of a merge stays ~33 KB (Huge: 3,906 pending instead of 256 cut it from 814 KB).
     private int MergeThreshold => Math.Max(256, _items.Count / 256);
 
     private readonly Lock _writeLock = new();
@@ -62,22 +63,24 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         if (fragment.Length == 0) return GetByStartsWith(fragment);
 
         var state = Volatile.Read(ref _state);
-        var block = FindBlock<Substring, SubstringOrder>(state.Base.Substrings, fragment).AsSpan();
+        var items = state.Base.ByPrefix;
+        var order = new SubstringOrder(items, []);
+        var block = FindBlock<Substring, SubstringOrder>(state.Base.Substrings, fragment, order).AsSpan();
         List<int> removedAt = [];
         foreach (var x in state.Removed.ByPrefix)
         {
             var offset = x.Key.IndexOf(fragment, StringComparison.Ordinal);
             // Its entry starts with fragment, so it is in the block.
-            if (offset >= 0) removedAt.Add(block.BinarySearch(new Substring(x.Key, x.Id, (ushort)offset, 0), default(SubstringOrder)));
+            if (offset >= 0) removedAt.Add(block.BinarySearch(new Substring(items.AsSpan().BinarySearch(x, default(PrefixOrder)), (ushort)offset, 0), order));
         }
         removedAt.Sort();
         var hits = new List<Entry>(block.Length + state.Added.Count);
         var r = 0;
         for (var i = 0; i < block.Length; i++)
         {
-            var (key, id, _, repeat) = block[i];
+            var (item, _, repeat) = block[i];
             if (r < removedAt.Count && removedAt[r] == i) r++;
-            else if (fragment.Length > repeat) hits.Add(new Entry(key, id));
+            else if (fragment.Length > repeat) hits.Add(items[item]);
         }
         // Added items are never in Base, so they can't repeat a hit.
         foreach (var x in state.Added.ByPrefix)
@@ -117,45 +120,59 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     private void Publish(State state) =>
         Volatile.Write(ref _state, state.Added.Count + state.Removed.Count >= MergeThreshold ? Merge(state) : state);
 
-    // The three sorts are independent, so they run at once.
+    // The three sorts are independent, so they run at once. Substrings is built naming items by their index in `all`,
+    // then renumbered to their index in ByPrefix once that is sorted (SubstringOrder doesn't depend on the numbering).
     private static Snapshot Build(IReadOnlyCollection<Entry> items)
     {
-        Entry[] prefixArray = [..items];
-        Entry[] suffixArray = [..items];
+        Entry[] all = [..items];
+        Entry[] prefixArray = [..all];
+        Entry[] suffixArray = [..all];
+        // Sorted along with prefixArray: ByPrefix[p] is all[from[p]].
+        var from = Enumerable.Range(0, all.Length).ToArray();
         Substring[] substrings = [];
         Parallel.Invoke(
-            () => Array.Sort(prefixArray, default(PrefixOrder)),
+            () => Array.Sort(prefixArray, from, default(PrefixOrder)),
             () => Array.Sort(suffixArray, default(SuffixOrder)),
-            () => substrings = SortedSubstrings(items));
+            () => substrings = SortedSubstrings(all));
+        var at = new int[all.Length];
+        for (var p = 0; p < from.Length; p++) at[from[p]] = p;
+        Parallel.ForEach(Partitioner.Create(0, substrings.Length), range =>
+        {
+            for (var i = range.Item1; i < range.Item2; i++) substrings[i] = substrings[i] with { Item = at[substrings[i].Item] };
+        });
         return new Snapshot(prefixArray, suffixArray, substrings);
     }
 
     // One entry per char of every item, sorted. The entries are first put in buckets by their first char (a counting sort),
     // so the buckets sort in parallel. Repeat is filled in after sorting, in parallel too: SubstringOrder ignores it.
     //   GB19, US12, US99 -> bucket '1': (GB19, 2), (US12, 2)   bucket '9': (GB19, 3), (US99, 2), (US99, 3)   ...
-    private static Substring[] SortedSubstrings(IReadOnlyCollection<Entry> items)
+    private static Substring[] SortedSubstrings(Entry[] items)
     {
         // Bucket c is [start[c], start[c + 1]).
         var start = new int[char.MaxValue + 2];
-        
+
         foreach (var item in items)
             foreach (var c in item.Key)
                 start[c + 1]++;
-            
+
         for (var c = 1; c < start.Length; c++) start[c] += start[c - 1];
 
         var substrings = new Substring[start[^1]];
         var next = (int[])start.Clone();
-        foreach (var (key, id) in items)
-            for (var i = 0; i < key.Length; i++) substrings[next[key[i]]++] = new Substring(key, id, checked((ushort)i), 0);
+        for (var n = 0; n < items.Length; n++)
+        {
+            var key = items[n].Key;
+            for (var i = 0; i < key.Length; i++) substrings[next[key[i]]++] = new Substring(n, checked((ushort)i), 0);
+        }
 
         // Biggest first and one at a time (NoBuffering), so a big bucket doesn't start last and leave the other cores idle.
         var buckets = Enumerable.Range(0, char.MaxValue + 1).Where(c => start[c + 1] - start[c] > 1).OrderByDescending(c => start[c + 1] - start[c]);
-        Parallel.ForEach(Partitioner.Create(buckets, EnumerablePartitionerOptions.NoBuffering), c =>Array.Sort(substrings, start[c], start[c + 1] - start[c], default(SubstringOrder)));
+        var order = new SubstringOrder(items, []);
+        Parallel.ForEach(Partitioner.Create(buckets, EnumerablePartitionerOptions.NoBuffering), c =>Array.Sort(substrings, start[c], start[c + 1] - start[c], order));
         Parallel.ForEach(Partitioner.Create(0, substrings.Length), range =>
         {
             for (var i = range.Item1; i < range.Item2; i++)
-                substrings[i] = substrings[i] with { Repeat = (ushort)RepeatAt(substrings[i].Key, substrings[i].Offset) };
+                substrings[i] = substrings[i] with { Repeat = (ushort)RepeatAt(items[substrings[i].Item].Key, substrings[i].Offset) };
         });
         return substrings;
     }
@@ -164,23 +181,32 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     // ByPrefix [GB19, US12, US99] + Added [US55] + Removed [US12]:
     //   copy [GB19], put US55, skip US12, copy [US99] -> [GB19, US55, US99]
     // BySuffix the same way in its own order; Substrings drops US12's 4 entries and puts US55's 4 at their places.
+    // Substrings name items by index: Base's in b.ByPrefix, added ones past its end (see SubstringOrder), and the copy
+    // renumbers them all to the new ByPrefix (Merged.NewIndexes): GB19 0 -> 0, US99 2 -> 2, US55 (added, so 3) -> 1.
     private static State Merge(State state)
     {
         var (b, added, removed) = (state.Base, state.Added, state.Removed);
+        var byPrefix = MergeSorted<Entry, PrefixOrder>(b.ByPrefix, removed.ByPrefix, added.ByPrefix, default, parallel: true);
+        var newIndex = byPrefix.NewIndexes();
+        var order = new SubstringOrder(b.ByPrefix, added.ByPrefix);
         var next = new Snapshot(
-            MergeSorted<Entry, PrefixOrder>(b.ByPrefix, removed.ByPrefix, added.ByPrefix, parallel: true).ToArray(),
-            MergeSorted<Entry, SuffixOrder>(b.BySuffix, removed.BySuffix, added.BySuffix, parallel: true).ToArray(),
-            MergeSorted<Substring, SubstringOrder>(b.Substrings, removed.ByPrefix.SelectMany(SubstringsOf).ToArray(),
-                added.ByPrefix.SelectMany(SubstringsOf).Order(default(SubstringOrder)).ToArray(), parallel: true).ToArray());
+            byPrefix.ToArray(),
+            MergeSorted<Entry, SuffixOrder>(b.BySuffix, removed.BySuffix, added.BySuffix, default, parallel: true).ToArray(),
+            MergeSorted<Substring, SubstringOrder>(b.Substrings,
+                removed.ByPrefix.SelectMany(x => SubstringsOf(b.ByPrefix.AsSpan().BinarySearch(x, default(PrefixOrder)), x.Key)).ToArray(),
+                added.ByPrefix.SelectMany((x, i) => SubstringsOf(b.ByPrefix.Length + i, x.Key)).Order(order).ToArray(),
+                order, parallel: true, renumber: x => x with { Item = newIndex[x.Item] }).ToArray());
         return new State(next, Added: Delta.Empty, Removed: Delta.Empty);
     }
 
     // sorted without `removed`, plus `added`, both of them in TOrder (a total order). Every removed entry is in sorted and no added
     // one is, so each one's place is one binary search, and Merged copies the stretches between those places whole.
     // `removed` may be in any order: sorting its places (ints) is cheaper than sorting it (Merge's removed substrings).
-    // parallel: the searches and copies are independent; on Huge Merge's (~47k substring searches over 12M entries, a 192 MB copy)
+    // parallel: the searches and copies are independent; on Huge Merge's (~47k substring searches over 12M entries, a 96 MB copy)
     // took most of its time on one core.
-    private static Merged<T> MergeSorted<T, TOrder>(ArraySegment<T> sorted, ArraySegment<T> removed, ArraySegment<T> added, bool parallel = false) where TOrder : struct, IOrder<T>
+    // renumber: applied to every entry of the result, as it is copied (Merge's Substrings).
+    private static Merged<T> MergeSorted<T, TOrder>(ArraySegment<T> sorted, ArraySegment<T> removed, ArraySegment<T> added, TOrder order,
+        bool parallel = false, Func<T, T>? renumber = null) where TOrder : struct, IOrder<T>
     {
         var removedAt = new int[removed.Count];
         // In order, since added is, so items that go to the same place go there in order.
@@ -189,19 +215,19 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         // i < removed.Count: a removed entry's index, else an added one's insertion point.
         void Place(int i)
         {
-            if (i < removed.Count) removedAt[i] = sorted.AsSpan().BinarySearch(removed[i], default(TOrder));
-            else addedAt[i - removed.Count] = (~sorted.AsSpan().BinarySearch(added[i - removed.Count], default(TOrder)), added[i - removed.Count]);
+            if (i < removed.Count) removedAt[i] = sorted.AsSpan().BinarySearch(removed[i], order);
+            else addedAt[i - removed.Count] = (~sorted.AsSpan().BinarySearch(added[i - removed.Count], order), added[i - removed.Count]);
         }
 
         if (parallel) Parallel.For(0, removed.Count + added.Count, Place);
         else for (var i = 0; i < removed.Count + added.Count; i++) Place(i);
 
         Array.Sort(removedAt);
-        return new Merged<T>(sorted, removedAt, addedAt, parallel);
+        return new Merged<T>(sorted, removedAt, addedAt, parallel, renumber);
     }
 
-    private static IEnumerable<Substring> SubstringsOf(Entry item) =>
-        Enumerable.Range(0, item.Key.Length).Select(i => new Substring(item.Key, item.Id, checked((ushort)i), (ushort)RepeatAt(item.Key, i)));
+    private static IEnumerable<Substring> SubstringsOf(int item, string key) =>
+        Enumerable.Range(0, key.Length).Select(i => new Substring(item, checked((ushort)i), (ushort)RepeatAt(key, i)));
 
     // Longest stretch from offset that also starts at an earlier offset of item.
     //   ("US99", 3) -> 1   "9" vs "US99", "S99", "99": common prefixes 0, 0, 1
@@ -223,38 +249,39 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     // Merged holds only positions until something reads it, so a caller that only needs Count never copies the block.
     private static IReadOnlyList<Entry> WithDelta<TOrder>(Entry[] sorted, Entry[] removed, Entry[] added, string query) where TOrder : struct, IOrder<Entry>
     {
-        var block = FindBlock<Entry, TOrder>(sorted, query);
-        var (removedBlock, addedBlock) = (FindBlock<Entry, TOrder>(removed, query), FindBlock<Entry, TOrder>(added, query));
-        return removedBlock.Count == 0 && addedBlock.Count == 0 ? block : MergeSorted<Entry, TOrder>(block, removedBlock, addedBlock);
+        var block = FindBlock<Entry, TOrder>(sorted, query, default);
+        var (removedBlock, addedBlock) = (FindBlock<Entry, TOrder>(removed, query, default), FindBlock<Entry, TOrder>(added, query, default));
+        return removedBlock.Count == 0 && addedBlock.Count == 0 ? block : MergeSorted<Entry, TOrder>(block, removedBlock, addedBlock, default);
     }
 
     // The entries where TOrder.CompareToQuery returns 0. It is < 0 before that block and > 0 after it,
     // so Start = first entry with compare >= 0, End = first entry with compare > 0.
     // ByPrefix [GB19, US12, US99] with PrefixOrder, "US": [< 0, 0, 0] -> [1, 3)
     // A miss is an empty block:                     "FR": [> 0, > 0, > 0] -> [0, 0)
-    private static ArraySegment<T> FindBlock<T, TOrder>(T[] sorted, string query) where TOrder : IOrder<T>
+    private static ArraySegment<T> FindBlock<T, TOrder>(T[] sorted, string query, TOrder order) where TOrder : IOrder<T>
     {
         // A Boundary never equals an entry, so BinarySearch always misses and returns ~(index where the boundary would go).
-        var start = ~sorted.AsSpan().BinarySearch(new Boundary<T, TOrder>(query, PastBlock: false));
-        var end = start + ~sorted.AsSpan(start).BinarySearch(new Boundary<T, TOrder>(query, PastBlock: true));
+        var start = ~sorted.AsSpan().BinarySearch(new Boundary<T, TOrder>(order, query, PastBlock: false));
+        var end = start + ~sorted.AsSpan(start).BinarySearch(new Boundary<T, TOrder>(order, query, PastBlock: true));
         return new ArraySegment<T>(sorted, start, end - start);
     }
 
     // Sorts after the entries before the block (PastBlock: after the block's own entries too) and before all others.
-    private readonly record struct Boundary<T, TOrder>(string Query, bool PastBlock) : IComparable<T> where TOrder : IOrder<T>
+    private readonly record struct Boundary<T, TOrder>(TOrder Order, string Query, bool PastBlock) : IComparable<T> where TOrder : IOrder<T>
     {
         public int CompareTo(T? entry)
         {
-            var c = TOrder.CompareToQuery(entry!, Query);
+            var c = Order.CompareToQuery(entry!, Query);
             return c < 0 || (PastBlock && c == 0) ? 1 : -1;
         }
     }
 
     // An order the arrays are sorted in (Compare), and its queries' blocks: CompareToQuery is 0 for the entries that match,
     // < 0 before them and > 0 after them. Structs, so the generic methods above get a copy each with the comparison inlined.
+    // PrefixOrder and SuffixOrder have no state (default); SubstringOrder carries the items its entries name.
     private interface IOrder<in T> : IComparer<T>
     {
-        static abstract int CompareToQuery(T entry, string query);
+        int CompareToQuery(T entry, string query);
     }
 
     // Entries with one Key sort by Id, so no two entries are equal and a binary search finds the exact one.
@@ -271,7 +298,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         //   ("GB19", "US")  -> < 0   'G' < 'U'
         //   ("US12", "USA") -> < 0   '1' < 'A'
         //   ("U",    "US")  -> < 0   item ran out first, so it sorts before (tests have 1-char items)
-        public static int CompareToQuery(Entry item, string prefix) => string.CompareOrdinal(item.Key, 0, prefix, 0, prefix.Length);
+        public int CompareToQuery(Entry item, string prefix) => string.CompareOrdinal(item.Key, 0, prefix, 0, prefix.Length);
     }
 
     private readonly struct SuffixOrder : IOrder<Entry>
@@ -313,7 +340,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         //   ("US12", "9")   -> < 0   '2' < '9'
         //   ("US12", "B12") -> > 0   '2' = '2', '1' = '1', then 'S' > 'B'
         //   ("12",   "312") -> < 0   item ran out first
-        public static int CompareToQuery(Entry entry, string suffix)
+        public int CompareToQuery(Entry entry, string suffix)
         {
             var item = entry.Key;
             for (var i = 0; i < suffix.Length; i++)
@@ -326,21 +353,26 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         }
     }
 
-    private readonly struct SubstringOrder : IOrder<Substring>
+    // An entry's Item is an index into items (a Snapshot's ByPrefix) or, past its end, into added (Merge's added items, not in it yet).
+    private readonly struct SubstringOrder(Entry[] items, Entry[] added) : IOrder<Substring>
     {
+        private Entry ItemOf(Substring x) => x.Item < items.Length ? items[x.Item] : added[x.Item - items.Length];
+
         // Ties ("9" of GB19 and of US99) broken by Key, then Id, so no two entries are equal and Merge's binary search finds the exact one.
+        // Not by Item: items and added are numbered apart.
         public int Compare(Substring x, Substring y)
         {
-            var c = x.Key.AsSpan(x.Offset).SequenceCompareTo(y.Key.AsSpan(y.Offset));
-            if (c == 0) c = string.CompareOrdinal(x.Key, y.Key);
-            return c != 0 ? c : x.Id.CompareTo(y.Id);
+            var (a, b) = (ItemOf(x), ItemOf(y));
+            var c = a.Key.AsSpan(x.Offset).SequenceCompareTo(b.Key.AsSpan(y.Offset));
+            if (c == 0) c = string.CompareOrdinal(a.Key, b.Key);
+            return c != 0 ? c : a.Id.CompareTo(b.Id);
         }
 
         // PrefixOrder.CompareToQuery on the item's text starting at entry.Offset.
         //   ((US99, 2), "9") -> 0     "99" starts with "9"
         //   ((US12, 1), "9") -> > 0   "S12": 'S' > '9'
-        public static int CompareToQuery(Substring entry, string fragment) =>
-            string.CompareOrdinal(entry.Key, entry.Offset, fragment, 0, fragment.Length);
+        public int CompareToQuery(Substring entry, string fragment) =>
+            string.CompareOrdinal(ItemOf(entry).Key, entry.Offset, fragment, 0, fragment.Length);
     }
 
     private sealed record Snapshot(Entry[] ByPrefix, Entry[] BySuffix, Substring[] Substrings);
@@ -377,8 +409,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
 
     // sorted without the entries at removedAt, plus each addedAt item put before sorted[At]; both in order.
     // Only the positions until something reads it (indexer, enumeration), which copies the stretches between them once
-    // (on all cores if parallel).
-    private sealed class Merged<T>(ArraySegment<T> sorted, int[] removedAt, (int At, T Item)[] addedAt, bool parallel) : IReadOnlyList<T>
+    // (on all cores if parallel), passing each entry through renumber if given.
+    private sealed class Merged<T>(ArraySegment<T> sorted, int[] removedAt, (int At, T Item)[] addedAt, bool parallel, Func<T, T>? renumber) : IReadOnlyList<T>
     {
         // Racing readers may both copy; either result is the same.
         private T[]? _array;
@@ -392,6 +424,23 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
         public T[] ToArray() => _array ??= Copy();
+
+        // Where each entry ends up: sorted's at their own index (removed ones -1), then added's.
+        //   [GB19, US12, US99] without US12, plus US55 at 2 -> [0, -1, 2, 1]
+        public int[] NewIndexes()
+        {
+            var at = new int[sorted.Count + addedAt.Length];
+            int r = 0, a = 0, to = 0;
+            for (var from = 0; from <= sorted.Count; from++)
+            {
+                // Added items at this place go before sorted[from], as in Copy.
+                while (a < addedAt.Length && addedAt[a].At == from) at[sorted.Count + a++] = to++;
+                if (from == sorted.Count) break;
+                if (r < removedAt.Length && removedAt[r] == from) { at[from] = -1; r++; }
+                else at[from] = to++;
+            }
+            return at;
+        }
 
         // The walk only finds the stretches (and puts the added items); copying them is the work, so that part may go parallel.
         private T[] Copy()
@@ -408,23 +457,31 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
                 stretches[s++] = (from, to, at - from);
                 to += at - from;
                 from = at;
-                if (insert) result[to++] = addedAt[a++].Item;
+                if (insert) result[to++] = renumber is null ? addedAt[a++].Item : renumber(addedAt[a++].Item);
                 else { from++; r++; }
             }
             stretches[s++] = (from, to, sorted.Count - from);
 
-            void CopyStretch(int i) => sorted.AsSpan(stretches[i].From, stretches[i].Length).CopyTo(result.AsSpan(stretches[i].To));
+            void CopyStretch(int i)
+            {
+                var source = sorted.AsSpan(stretches[i].From, stretches[i].Length);
+                var target = result.AsSpan(stretches[i].To, stretches[i].Length);
+                if (renumber is null) source.CopyTo(target);
+                else for (var k = 0; k < source.Length; k++) target[k] = renumber(source[k]);
+            }
             if (parallel) Parallel.For(0, s, CopyStretch);
             else for (var i = 0; i < s; i++) CopyStretch(i);
             return result;
         }
     }
 
-    // Key[Offset..] is this entry's sort key. 16 bytes (reference + int + two ushorts): Id fits in the room two int offsets took.
-    // shortcut: ushort Offset limits keys to 65,535 chars (Build throws past it); widen to int (24 bytes per entry) if longer keys appear.
+    // Item's Key[Offset..] is this entry's sort key; Item is the item's index in the same Snapshot's ByPrefix.
+    // 8 bytes and no reference, so the GC never scans the array: as (string Key, int Id, ...) every merge's fresh copy
+    // (192 MB on Huge) had all its references scanned by the next GC, a ~26 ms pause after each merge.
+    // shortcut: ushort Offset limits keys to 65,535 chars (Build throws past it); widen to int (12 bytes per entry) if longer keys appear.
     // Repeat: the longest stretch from Offset that also starts at an earlier offset of Key (RepeatAt);
     // a hit is a duplicate when fragment.Length <= Repeat, since the fragment then also starts earlier.
     //   (US99, 3) "9":  "9" also starts at offset 2 -> Repeat = 1, so Filter("9") skips it
     //   (US99, 2) "99": no earlier offset starts with "9" -> Repeat = 0, never skipped
-    private readonly record struct Substring(string Key, int Id, ushort Offset, ushort Repeat);
+    private readonly record struct Substring(int Item, ushort Offset, ushort Repeat);
 }
