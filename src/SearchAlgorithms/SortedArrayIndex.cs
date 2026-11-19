@@ -157,7 +157,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
 
         for (var c = 1; c < start.Length; c++) start[c] += start[c - 1];
 
-        var substrings = new Substring[start[^1]];
+        // Uninitialized: the loop below fills every slot.
+        var substrings = GC.AllocateUninitializedArray<Substring>(start[^1]);
         var next = (int[])start.Clone();
         for (var n = 0; n < items.Length; n++)
         {
@@ -447,7 +448,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         {
             var stretches = new (int From, int To, int Length)[removedAt.Length + addedAt.Length + 1];
             // Allocated last: on Huge, a large allocation after it (stretches, 564 KB) started a background GC during the copy, +12 us per update.
-            var result = new T[Count];
+            // Uninitialized: every slot is written below, so zeroing it (96 MB of Substrings on Huge) is wasted; T with references is zeroed anyway.
+            var result = GC.AllocateUninitializedArray<T>(Count);
             int from = 0, to = 0, r = 0, a = 0, s = 0;
             while (r < removedAt.Length || a < addedAt.Length)
             {
