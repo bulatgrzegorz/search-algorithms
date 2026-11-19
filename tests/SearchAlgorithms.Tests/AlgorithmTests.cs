@@ -80,7 +80,19 @@ public class AlgorithmTests
             Assert.Equal(Sorted(items.Where(x => x.Key.StartsWith(q, StringComparison.Ordinal))), Sorted(algorithm.GetByStartsWith(q)));
             Assert.Equal(Sorted(items.Where(x => x.Key.EndsWith(q, StringComparison.Ordinal))), Sorted(algorithm.GetByEndsWith(q)));
             Assert.Equal(Sorted(items.Where(x => x.Key.Contains(q, StringComparison.Ordinal))), Sorted(algorithm.Filter(q)));
+            AssertReadable(() => algorithm.Filter(q));
         }
+    }
+
+    // A result may find its entries only as they are read (SortedArrayIndex's Filter): reading by index, front to back
+    // or back to front, must give what enumerating gives.
+    static void AssertReadable(Func<IReadOnlyList<Entry>> search)
+    {
+        var expected = search().ToList();
+        var forward = search();
+        Assert.Equal(expected, Enumerable.Range(0, forward.Count).Select(i => forward[i]));
+        var backward = search();
+        Assert.Equal(Enumerable.Reverse(expected), Enumerable.Range(0, backward.Count).Reverse().Select(i => backward[i]));
     }
 
     static IEnumerable<Entry> Sorted(IEnumerable<Entry> entries) => entries.OrderBy(x => x.Id).ThenBy(x => x.Key, StringComparer.Ordinal);

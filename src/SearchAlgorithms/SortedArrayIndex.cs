@@ -60,6 +60,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     //   Removed [US99]: IndexOf("9") = 2, (US99, 2) is block entry 2 -> skip 2 -> [GB19]
     // The delta is scanned (IndexOf / Contains per item), not indexed like Base: keeping sorted substrings for it made
     // writes ~15x slower on Huge (each write copies them, ~200 B per pending item) and Filter no faster.
+    // The walk itself happens only as far as the hits are read (see Hits).
     public IReadOnlyList<Entry> Filter(string fragment)
     {
         // Every item contains "", also "" itself, which has no Substrings entry.
@@ -68,27 +69,20 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         var state = Volatile.Read(ref _state);
         var items = state.Base.ByPrefix;
         var order = new SubstringOrder(items, []);
-        var block = FindBlock<Substring, SubstringOrder>(state.Base.Substrings, fragment, order).AsSpan();
+        var block = FindBlock<Substring, SubstringOrder>(state.Base.Substrings, fragment, order);
         List<int> removedAt = [];
         foreach (var x in state.Removed.ByPrefix)
         {
             var offset = x.Key.IndexOf(fragment, StringComparison.Ordinal);
             // Its entry starts with fragment, so it is in the block.
-            if (offset >= 0) removedAt.Add(block.BinarySearch(new Substring(items.AsSpan().BinarySearch(x, default(PrefixOrder)), (ushort)offset, 0), order));
+            if (offset >= 0) removedAt.Add(block.AsSpan().BinarySearch(new Substring(items.AsSpan().BinarySearch(x, default(PrefixOrder)), (ushort)offset, 0), order));
         }
         removedAt.Sort();
-        var hits = new List<Entry>(block.Length + state.Added.Count);
-        var r = 0;
-        for (var i = 0; i < block.Length; i++)
-        {
-            var (item, _, repeat) = block[i];
-            if (r < removedAt.Count && removedAt[r] == i) r++;
-            else if (fragment.Length > repeat) hits.Add(items[item]);
-        }
         // Added items are never in Base, so they can't repeat a hit.
+        List<Entry> added = [];
         foreach (var x in state.Added.ByPrefix)
-            if (x.Key.Contains(fragment, StringComparison.Ordinal)) hits.Add(x);
-        return hits;
+            if (x.Key.Contains(fragment, StringComparison.Ordinal)) added.Add(x);
+        return new Hits(items, block, fragment.Length, removedAt, added);
     }
 
     // Delta, starting empty (Base = GB19, US12, US99):
@@ -478,6 +472,78 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
             else for (var i = 0; i < s; i++) CopyStretch(i);
             return result;
         }
+    }
+
+    // Filter's hits: the block's kept entries (except removedAt), then added; found only as far as something reads them.
+    // Count scans the block's Repeat values only (no item reads). The first read finds 16 hits; a read past them finds all
+    // the rest, as one walk. Typeahead reads Count and the first 10 of up to hundreds of thousands (Huge, "U"): as a list
+    // that was ~22 MB per typed query. (Doubling instead, a reader of every hit at Huge was ~1.5x slower than the list.)
+    //   Filter("9") with Added [FR99]: Count = 2 kept in the block + 1 added = 3; this[0] finds GB19, US99, FR99.
+    private sealed class Hits(Entry[] items, ArraySegment<Substring> block, int length, List<int> removedAt, List<Entry> added) : IReadOnlyList<Entry>
+    {
+        private readonly Lock _lock = new();
+        // Replaced whole, so the indexer reads it without the lock; where the walk stopped (_next, _r) is under the lock.
+        private Found _found = new([], 0);
+        private int _next, _r;
+        private int _count = -1;
+
+        // removedAt entries are kept ones (each is its item's first match), so they come off the kept count.
+        public int Count => _count >= 0 ? _count : _count = CountKept() - removedAt.Count + added.Count;
+
+        public Entry this[int index]
+        {
+            get
+            {
+                var found = Volatile.Read(ref _found);
+                if ((uint)index >= (uint)found.Count)
+                {
+                    ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)Count, nameof(index));
+                    found = FindUpTo(index);
+                }
+                return found.Hits[index];
+            }
+        }
+
+        public IEnumerator<Entry> GetEnumerator()
+        {
+            for (var i = 0; i < Count; i++) yield return this[i];
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+        private int CountKept()
+        {
+            var kept = 0;
+            foreach (var x in block.AsSpan())
+                if (length > x.Repeat) kept++;
+            return kept;
+        }
+
+        // Every Found is full (Count == Hits.Length), so a bigger one is a new array and readers of the old one are unaffected.
+        private Found FindUpTo(int index)
+        {
+            lock (_lock)
+            {
+                var found = _found;
+                if (index < found.Count) return found;
+                var hits = found.Hits;
+                Array.Resize(ref hits, index < 16 ? Math.Min(Count, 16) : Count);
+                var n = found.Count;
+                var span = block.AsSpan();
+                for (; n < hits.Length && _next < span.Length; _next++)
+                {
+                    var (item, _, repeat) = span[_next];
+                    if (_r < removedAt.Count && removedAt[_r] == _next) _r++;
+                    else if (length > repeat) hits[n++] = items[item];
+                }
+                // Past the block's last kept entry, the rest are added ones.
+                for (var inBlock = Count - added.Count; n < hits.Length; n++) hits[n] = added[n - inBlock];
+                Volatile.Write(ref _found, found = new Found(hits, n));
+                return found;
+            }
+        }
+
+        private sealed record Found(Entry[] Hits, int Count);
     }
 
     // Item's Key[Offset..] is this entry's sort key; Item is the item's index in the same Snapshot's ByPrefix.
