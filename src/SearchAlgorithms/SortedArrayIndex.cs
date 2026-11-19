@@ -168,8 +168,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     {
         var (b, added, removed) = (state.Base, state.Added, state.Removed);
         var next = new Snapshot(
-            MergeSorted<Entry, PrefixOrder>(b.ByPrefix, removed.ByPrefix, added.ByPrefix).ToArray(),
-            MergeSorted<Entry, SuffixOrder>(b.BySuffix, removed.BySuffix, added.BySuffix).ToArray(),
+            MergeSorted<Entry, PrefixOrder>(b.ByPrefix, removed.ByPrefix, added.ByPrefix, parallel: true).ToArray(),
+            MergeSorted<Entry, SuffixOrder>(b.BySuffix, removed.BySuffix, added.BySuffix, parallel: true).ToArray(),
             MergeSorted<Substring, SubstringOrder>(b.Substrings, removed.ByPrefix.SelectMany(SubstringsOf).ToArray(),
                 added.ByPrefix.SelectMany(SubstringsOf).Order(default(SubstringOrder)).ToArray(), parallel: true).ToArray());
         return new State(next, Added: Delta.Empty, Removed: Delta.Empty);
@@ -178,7 +178,8 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     // sorted without `removed`, plus `added`, both of them in TOrder (a total order). Every removed entry is in sorted and no added
     // one is, so each one's place is one binary search, and Merged copies the stretches between those places whole.
     // `removed` may be in any order: sorting its places (ints) is cheaper than sorting it (Merge's removed substrings).
-    // parallel: the searches are independent; Merge's substring ones (~47k over 12M entries on Huge) were half its time on one core.
+    // parallel: the searches and copies are independent; on Huge Merge's (~47k substring searches over 12M entries, a 192 MB copy)
+    // took most of its time on one core.
     private static Merged<T> MergeSorted<T, TOrder>(ArraySegment<T> sorted, ArraySegment<T> removed, ArraySegment<T> added, bool parallel = false) where TOrder : struct, IOrder<T>
     {
         var removedAt = new int[removed.Count];
@@ -196,7 +197,7 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
         else for (var i = 0; i < removed.Count + added.Count; i++) Place(i);
 
         Array.Sort(removedAt);
-        return new Merged<T>(sorted, removedAt, addedAt);
+        return new Merged<T>(sorted, removedAt, addedAt, parallel);
     }
 
     private static IEnumerable<Substring> SubstringsOf(Entry item) =>
@@ -375,8 +376,9 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
     }
 
     // sorted without the entries at removedAt, plus each addedAt item put before sorted[At]; both in order.
-    // Only the positions until something reads it (indexer, enumeration), which copies the stretches between them once.
-    private sealed class Merged<T>(ArraySegment<T> sorted, int[] removedAt, (int At, T Item)[] addedAt) : IReadOnlyList<T>
+    // Only the positions until something reads it (indexer, enumeration), which copies the stretches between them once
+    // (on all cores if parallel).
+    private sealed class Merged<T>(ArraySegment<T> sorted, int[] removedAt, (int At, T Item)[] addedAt, bool parallel) : IReadOnlyList<T>
     {
         // Racing readers may both copy; either result is the same.
         private T[]? _array;
@@ -391,22 +393,29 @@ public sealed class SortedArrayIndex : ISearchAlgorithm
 
         public T[] ToArray() => _array ??= Copy();
 
+        // The walk only finds the stretches (and puts the added items); copying them is the work, so that part may go parallel.
         private T[] Copy()
         {
+            var stretches = new (int From, int To, int Length)[removedAt.Length + addedAt.Length + 1];
+            // Allocated last: on Huge, a large allocation after it (stretches, 564 KB) started a background GC during the copy, +12 us per update.
             var result = new T[Count];
-            int from = 0, to = 0, r = 0, a = 0;
+            int from = 0, to = 0, r = 0, a = 0, s = 0;
             while (r < removedAt.Length || a < addedAt.Length)
             {
                 // An added entry at the place of a removed one sorts before it, so goes first.
                 var insert = a < addedAt.Length && (r == removedAt.Length || addedAt[a].At <= removedAt[r]);
                 var at = insert ? addedAt[a].At : removedAt[r];
-                sorted.AsSpan(from, at - from).CopyTo(result.AsSpan(to));
+                stretches[s++] = (from, to, at - from);
                 to += at - from;
                 from = at;
                 if (insert) result[to++] = addedAt[a++].Item;
                 else { from++; r++; }
             }
-            sorted.AsSpan(from).CopyTo(result.AsSpan(to));
+            stretches[s++] = (from, to, sorted.Count - from);
+
+            void CopyStretch(int i) => sorted.AsSpan(stretches[i].From, stretches[i].Length).CopyTo(result.AsSpan(stretches[i].To));
+            if (parallel) Parallel.For(0, s, CopyStretch);
+            else for (var i = 0; i < s; i++) CopyStretch(i);
             return result;
         }
     }
