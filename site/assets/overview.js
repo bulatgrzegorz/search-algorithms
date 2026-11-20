@@ -242,8 +242,8 @@
   function scenarios(B) {
     const search = (writes, size = "Medium") => q => B.search.filter(r => r.method === q && r.writes === writes && r.size === size);
     return [
-      { id: "single", label: "Single query", queries: ["StartsWith", "EndsWith", "Filter"], rows: search(0), title: q => `One ${q} query`, sub: "Mean time per query, no writes running.", unit: "time" },
-      { id: "writes", label: "Under writes", queries: ["StartsWith", "EndsWith", "Filter"], rows: search(1000), title: q => `One ${q} query, 1,000 writes/s running`, sub: "Mean time per query while a background writer swaps entries (Remove + Add).", unit: "time" },
+      { id: "single", label: "Single query", queries: ["StartsWith", "EndsWith", "Filter"], rows: search(0), title: q => `One ${q} query`, sub: "Mean time per query, no writes running. Reads the result's Count, not its hits.", unit: "time" },
+      { id: "writes", label: "Under writes", queries: ["StartsWith", "EndsWith", "Filter"], rows: search(1000), title: q => `One ${q} query, 1,000 writes/s running`, sub: "Mean time per query while a background writer swaps entries (Remove + Add). Reads the result's Count, not its hits.", unit: "time" },
       { id: "typeahead", label: "Typeahead", queries: [...new Set(B.typeahead.map(r => r.method))], rows: q => B.typeahead.filter(r => r.method === q), title: q => `Typeahead, ${q}`, sub: "One search per keystroke of a 3–6 character query, first 10 hits read. Time per typed query.", unit: "time" },
       { id: "build", label: "Build", queries: ["Time", "Allocated"], rows: q => B.build.map(r => ({ ...r, mean: q === "Time" ? r.mean : r.allocated })), title: q => q === "Time" ? "Building the index from 100,000 entries" : "Bytes allocated while building", sub: "The constructor, start to finish.", unit: q => q === "Time" ? "time" : "bytes" },
       { id: "writes1", label: "Add / Remove", queries: [...new Set(B.mutation.map(r => r.method))], rows: q => B.mutation.filter(r => r.method === q), title: q => `One ${q}`, sub: "Single-threaded cost of one write. For Lucene, part of the cost moves to the next search's refresh.", unit: "time" },

@@ -129,7 +129,7 @@
       if (added.delete(item)) reason = "cancel-add";
       else { removed.add(item); reason = "removed"; }
     }
-    const threshold = Math.max(256, Math.floor(items.size / 256));
+    const threshold = Math.max(256, Math.floor(items.size / 128));
     if (added.size + removed.size >= threshold) return { state: newState([...items]), reason: "merged" };
     return { state: { base: state.base, added: [...added].sort(ordinal), removed: [...removed].sort(ordinal), items }, reason };
   }
@@ -299,7 +299,7 @@
       canvas += `<div class="metric-row"><span class="metric">start = ${frame.start}</span><span class="metric">end = ${frame.end}</span><span class="metric">count = ${frame.end - frame.start}</span></div>`;
     } else {
       title = `${frame.hits.length} unique ${frame.hits.length === 1 ? "string" : "strings"} returned`;
-      body = kind === "contains" ? `Walk the block and keep entries where ${code(`${query.length} > Repeat`)}. A struck-through entry matches but repeats an earlier occurrence in its own string. Return each eligible original string once. There are no pending writes in this demo.` : `With no matching pending changes, return an ArraySegment covering this block. Its Count is ${frame.hits.length}; returning the window does not copy its entries.`;
+      body = kind === "contains" ? `Walk the block and keep entries where ${code(`${query.length} > Repeat`)}. A struck-through entry matches but repeats an earlier occurrence in its own string. Return each eligible original string once. Filter itself returns before this walk; it runs as the caller reads hits. There are no pending writes in this demo.` : `With no matching pending changes, return an ArraySegment covering this block. Its Count is ${frame.hits.length}; returning the window does not copy its entries.`;
       canvas += `<div class="metric-row">${pills(frame.hits)}</div>`;
     }
     $("search-canvas").innerHTML = canvas;
@@ -341,7 +341,7 @@
 
   let mutation = newState();
   function renderMutation() {
-    const threshold = Math.max(256, Math.floor(mutation.items.size / 256));
+    const threshold = Math.max(256, Math.floor(mutation.items.size / 128));
     const pending = mutation.added.length + mutation.removed.length;
     $("mutation-state").innerHTML = `<div class="state-diagram"><div><span class="view-label">BASE · unchanged arrays</span><strong>${list(mutation.base)}</strong></div><span>+</span><div class="added-box"><span class="view-label">ADDED</span><strong>${list(mutation.added)}</strong></div><span>−</span><div class="removed-box"><span class="view-label">REMOVED</span><strong>${list(mutation.removed)}</strong></div></div><div class="metric-row"><span class="metric">_items.Count = ${mutation.items.size}</span><span class="metric">pending = ${pending}</span><span class="metric">merge threshold = ${threshold}</span></div><div class="progress-track" aria-label="${pending} of ${threshold} pending items before merge"><span style="width:${100 * pending / threshold}%"></span></div>`;
     $("mutation-orders").innerHTML = `<p>Added.ByPrefix: ${list(mutation.added)}<br>Added.BySuffix: ${list([...mutation.added].sort(suffixOrder))}</p><p>Removed.ByPrefix: ${list(mutation.removed)}<br>Removed.BySuffix: ${list([...mutation.removed].sort(suffixOrder))}</p>`;
@@ -352,7 +352,7 @@
     const result = searchState(mutation, kind, query);
     let explanation;
     if (result.materialized) {
-      explanation = `<div>Base block: ${result.baseBlock.length ? result.baseBlock.map(e => `${quoted(e.item.slice(e.offset))} from ${code(`${e.item} @ ${e.offset}`)} (Repeat ${e.repeat})`).join("; ") : "[]"}.</div><div>Removed representatives at block-relative positions: ${list(result.removedAt)}. Skip those and entries where ${query.length} ≤ Repeat.</div><div>Added strings matching Contains(${quoted(query)}): ${list(result.addedBlock)}.</div><div>Filter builds the hit list immediately.</div>`;
+      explanation = `<div>Base block: ${result.baseBlock.length ? result.baseBlock.map(e => `${quoted(e.item.slice(e.offset))} from ${code(`${e.item} @ ${e.offset}`)} (Repeat ${e.repeat})`).join("; ") : "[]"}.</div><div>Removed representatives at block-relative positions: ${list(result.removedAt)}. Skip those and entries where ${query.length} ≤ Repeat.</div><div>Added strings matching Contains(${quoted(query)}): ${list(result.addedBlock)}.</div><div>Count = ${result.baseBlock.filter(e => query.length > e.repeat).length} kept − ${result.removedAt.length} removed + ${result.addedBlock.length} added = ${result.hits.length}, from Repeat values alone. Filter walks the block only when a hit is read; this display reads them all.</div>`;
     } else {
       explanation = `<div>Base block: ${list(result.baseBlock)}.</div><div>Removed matching block: ${list(result.removedBlock)}. Added matching block: ${list(result.addedBlock)}.</div><div>${result.direct ? "Neither delta affects this query. Return the Base ArraySegment directly." : `MergeSorted records removed positions ${list(result.plan.removedAt)} and added positions ${list(result.plan.addedAt.map(e => `${e.item} before ${e.at}`))}, all relative to this Base block. Count = ${result.baseBlock.length} − ${result.removedBlock.length} + ${result.addedBlock.length} = ${result.hits.length}. This display reads the values, so it materializes the result.`}</div>`;
       if (kind === "contains") explanation = `<div>Empty fragment: delegate to GetByStartsWith("").</div>${explanation}`;
